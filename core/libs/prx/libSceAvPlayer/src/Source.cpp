@@ -40,6 +40,7 @@ constexpr std::uint32_t VideoBufferAlignment = 0x100;
 constexpr std::uint32_t AudioBufferAlignment = 0x10;
 constexpr std::uint32_t AudioChunkSamples = 1024;
 constexpr std::uint32_t AudioMaxChannels = 8;
+constexpr std::uint32_t VideoDecodeAheadFrames = 4;
 constexpr std::size_t VideoPacketLimit = 30;
 constexpr std::size_t AudioPacketLimit = 8;
 constexpr std::size_t AudioOnlyPacketLimit = 30;
@@ -661,8 +662,10 @@ private:
             pitch = AlignUp(static_cast<std::uint32_t>(decoder.context->width), VideoPitchAlignment);
             bufferHeight = AlignUp(static_cast<std::uint32_t>(decoder.context->height), VideoHeightAlignment);
             decoder.bufferSize = pitch * bufferHeight * 3 / 2;
-            count = settings.videoBuffers;
-            decoder.retained = count > 3 ? count - 3 : 0;
+            // The app's output buffers are not enough to decode ahead: with two of them one is always held by the app,
+            // so a caller that skips late frames itself (Unity sets SyncModeNone) never finds the next one ready.
+            count = settings.videoBuffers + VideoDecodeAheadFrames;
+            decoder.retained = settings.videoBuffers > 3 ? settings.videoBuffers - 3 : 0;
             texture = true;
             alignment = VideoBufferAlignment;
         } else {
@@ -783,16 +786,6 @@ private:
                 requested = reposition;
             }
             if (requested) {
-
-                static const bool keepIntro = std::getenv("APS5_AVP_KEEP_INTRO") != nullptr;
-                if (!keepIntro && !introSkipped && requested->target == 0 && format->duration > 0) {
-                    const auto lengthMs = static_cast<std::uint64_t>(format->duration / 1000);
-                    if (lengthMs >= 17000 && lengthMs <= 18000) {
-                        requested->target = lengthMs - 200;
-                        introSkipped = true;
-                        std::fprintf(stderr, "[avp] intro video skipped: jump to %llu ms of %llu\n", static_cast<unsigned long long>(requested->target), static_cast<unsigned long long>(lengthMs));
-                    }
-                }
                 seek(requested->target);
                 droppedSinceSeek = 0;
                 seekStartedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1159,7 +1152,6 @@ private:
 
     bool seekFramePending = false;
     std::uint64_t picturesShown = 0;
-    bool introSkipped = false;
     std::int64_t jumpLogUntilNs = 0;
     static std::int64_t nowNs() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
     std::uint32_t demuxVideoBytes = 0;
