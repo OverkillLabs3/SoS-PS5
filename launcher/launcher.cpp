@@ -50,8 +50,48 @@ const wchar_t* kLauncherIni = L"\\launcher.ini";
 
 bool ReadBorderless(const std::wstring& directory) {
     wchar_t mode[32] = {};
-    GetPrivateProfileStringW(L"Display", L"Mode", L"Windowed", mode, 32, (directory + kLauncherIni).c_str());
+    GetPrivateProfileStringW(L"Display", L"mode", L"Windowed", mode, 32, (directory + kLauncherIni).c_str());
     return _wcsicmp(mode, L"Borderless") == 0;
+}
+
+bool ReadSkipIntro(const std::wstring& directory) {
+    wchar_t value[8] = {};
+    GetPrivateProfileStringW(L"Startup", L"skip_intro", L"0", value, 8, (directory + kLauncherIni).c_str());
+    return wcscmp(value, L"1") == 0;
+}
+
+// The profile API adds a new section right below the last line. After Play has saved, every section header but the first is
+// preceded by exactly one blank line and trailing blank lines are dropped; other lines stay as they are. A UTF-16 file is left alone.
+void SeparateIniSections(const std::wstring& path) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || file == nullptr) return;
+    std::string text, formatted;
+    char buffer[4096];
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) text.append(buffer, count);
+    fclose(file);
+    if (text.rfind("\xFF\xFE", 0) == 0) return;
+    size_t blanks = 0;
+    for (size_t start = 0; start < text.size();) {
+        const size_t end = min(text.find('\n', start), text.size());
+        std::string line = text.substr(start, end - start);
+        start = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t first = line.find_first_not_of(" \t");
+        if (first == std::string::npos) {
+            ++blanks;
+            continue;
+        }
+        if (line[first] == '[') blanks = formatted.empty() ? 0 : 1;
+        for (; blanks > 0; --blanks) formatted += "\r\n";
+        formatted += line + "\r\n";
+    }
+    if (formatted == text) return;
+    const std::wstring temporary = path + L".tmp";
+    if (_wfopen_s(&file, temporary.c_str(), L"wb") != 0 || file == nullptr) return;
+    const bool written = fwrite(formatted.data(), 1, formatted.size(), file) == formatted.size();
+    if (fclose(file) != 0 || !written || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        DeleteFileW(temporary.c_str());
 }
 
 // The settings file is kSettingsHeader followed by JSON text with every character stored as four bytes.
@@ -666,15 +706,17 @@ struct Launcher {
     static constexpr UINT kMaxLayoutDpi = 168;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors.
-    static constexpr int kWidth = 440, kHeight = 324;
+    static constexpr int kWidth = 440, kHeight = 406;
     struct Placed { HWND control; RECT bounds; HFONT* face; };
     HWND window = nullptr;
     HWND mode = nullptr;
     HWND resolution = nullptr;
+    HWND skip = nullptr;
     HFONT font = nullptr, heading = nullptr;
     std::vector<Placed> placed;
     int chosen = -1;
     bool borderless = false;
+    bool skipIntro = false;
     bool play = false;
     template <typename Function> static Function User32(const char* name) {
         return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
@@ -756,6 +798,7 @@ struct Launcher {
         if (message == WM_COMMAND && self != nullptr && (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)) {
             self->play = LOWORD(wParam) == IDOK;
             self->borderless = SendMessageW(self->mode, CB_GETCURSEL, 0, 0) == 1;
+            self->skipIntro = SendMessageW(self->skip, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
             DestroyWindow(hwnd);
             return 0;
@@ -770,6 +813,7 @@ struct Launcher {
     // Shows the settings and saves them when Play is pressed; false means the player closed the launcher instead.
     bool Run(const std::wstring& directory, HICON icon) {
         borderless = ReadBorderless(directory);
+        skipIntro = ReadSkipIntro(directory);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
         // scaling the window as a bitmap, as before.
@@ -817,12 +861,15 @@ struct Launcher {
         // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
         control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
-        HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, 276, 92, 30, IDOK, font);
-        control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, 276, 92, 30, IDCANCEL, font);
+        control(L"BUTTON", L"Startup", BS_GROUPBOX, 24, 272, 392, 70, 0, font);
+        skip = control(L"BUTTON", L"Skip intro", BS_AUTOCHECKBOX | WS_TABSTOP, 44, 302, 352, 28, 102, font);
+        HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, 358, 92, 30, IDOK, font);
+        control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, 358, 92, 30, IDCANCEL, font);
 
         SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Windowed"));
         SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Borderless Fullscreen"));
         SendMessageW(mode, CB_SETCURSEL, borderless ? 1 : 0, 0);
+        SendMessageW(skip, BM_SETCHECK, skipIntro ? BST_CHECKED : BST_UNCHECKED, 0);
 
         const int fromFile = ReadResolutionFile(directory);
         const int current = fromFile >= 0 ? fromFile : ReadIntSetting(directory, kResolutionKey);
@@ -858,10 +905,15 @@ struct Launcher {
                 MoveFileExW((directory + L"\\resolution.txt").c_str(), (directory + L"\\resolution.txt.old").c_str(), MOVEFILE_REPLACE_EXISTING);
             }
         }
-        if (play && borderless != ReadBorderless(directory) &&
-            !WritePrivateProfileStringW(L"Display", L"Mode", borderless ? L"Borderless" : L"Windowed", (directory + kLauncherIni).c_str())) {
+        const bool saveMode = play && borderless != ReadBorderless(directory);
+        const bool saveSkip = play && skipIntro != ReadSkipIntro(directory);
+        if (saveMode && !WritePrivateProfileStringW(L"Display", L"mode", borderless ? L"Borderless" : L"Windowed", (directory + kLauncherIni).c_str())) {
             MessageBoxW(nullptr, L"The display mode could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
+        if (saveSkip && !WritePrivateProfileStringW(L"Startup", L"skip_intro", skipIntro ? L"1" : L"0", (directory + kLauncherIni).c_str())) {
+            MessageBoxW(nullptr, L"The Skip intro setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
+        }
+        if (saveMode || saveSkip) SeparateIniSections(directory + kLauncherIni);
         return play;
     }
 };
@@ -938,10 +990,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     bool borderless = false;
+    bool skipIntro = false;
     {
         Launcher launcher;
         if (!launcher.Run(directory, gameIcon)) return 0;
         borderless = launcher.borderless;
+        skipIntro = launcher.skipIntro;
     }
 
     const std::wstring runtime = directory + L"\\" + kRuntime;
@@ -1017,6 +1071,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             fclose(debug);
         }
     }
+    // The runtime reads the Skip intro choice from its environment; when it is off the variable is removed, so an inherited value cannot turn it on.
+    SetEnvironmentVariableW(L"SOS_SKIP_INTRO", skipIntro ? L"1" : nullptr);
     PROCESS_INFORMATION process{};
     std::wstring command = L"\"" + runtime + L"\"";
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process)) {
