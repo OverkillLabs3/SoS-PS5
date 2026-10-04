@@ -14,6 +14,7 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/HostExtension/include/HostExtension.hpp"
 
 PadInput::PadInput()
     : bindings(Pad::LoadInputMapping()), pressed(bindings.size()), wheelReleaseTimes(bindings.size()) {
@@ -334,6 +335,8 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
     if (ignoreInput) return;
     if (keyboard && event.key.repeat != 0) return;
     const bool down = event.type == SDL_KEYDOWN || event.type == SDL_MOUSEBUTTONDOWN;
+    // Like F11, a key press in the game window is also offered to the game-specific host extension, if one is registered.
+    if (keyboard && down && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) HostKeyPressed_nid_no_patch(event.key.keysym.scancode);
     for (std::size_t index = 0; index < bindings.size(); ++index) {
         const auto& binding = bindings[index];
         const bool matches = keyboard

@@ -48,6 +48,19 @@ const Resolution kResolutions[] = {{0, L"3840 x 2160 (4K)"}, {6, L"2560 x 1440 (
 // Host settings that do not belong in the game's save, read with the Windows profile API from launcher.ini.
 const wchar_t* kLauncherIni = L"\\launcher.ini";
 
+// [Cheats] in launcher.ini holds the state each cheat starts with; the runtime gets it from the variable and its key switches it while playing.
+struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; };
+const Cheat kCheats[] = {{L"god_mode", L"God Mode", L"SOS_GOD_MODE", 103},
+                         {L"infinite_spartan_spirit", L"Infinite Spartan Spirit", L"SOS_INFINITE_SPARTAN_SPIRIT", 104}};
+constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
+
+// Only the value 1 turns a cheat on; a missing file, section or key, or any other value, leaves it off.
+bool ReadCheat(const std::wstring& directory, const Cheat& cheat) {
+    wchar_t value[8] = {};
+    GetPrivateProfileStringW(L"Cheats", cheat.key, L"0", value, 8, (directory + kLauncherIni).c_str());
+    return wcscmp(value, L"1") == 0;
+}
+
 bool ReadBorderless(const std::wstring& directory) {
     wchar_t mode[32] = {};
     GetPrivateProfileStringW(L"Display", L"Mode", L"Windowed", mode, 32, (directory + kLauncherIni).c_str());
@@ -666,7 +679,9 @@ struct Launcher {
     static constexpr UINT kMaxLayoutDpi = 168;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors.
-    static constexpr int kWidth = 440, kHeight = 324;
+    // The Cheats group gets one 32-pixel row per cheat; Play and Exit follow it.
+    static constexpr int kCheatsTop = 272, kCheatsHeight = 70 + 32 * static_cast<int>(kCheatCount - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
+    static constexpr int kWidth = 440, kHeight = kButtonsTop + 48;
     struct Placed { HWND control; RECT bounds; HFONT* face; };
     HWND window = nullptr;
     HWND mode = nullptr;
@@ -676,6 +691,8 @@ struct Launcher {
     int chosen = -1;
     bool borderless = false;
     bool play = false;
+    HWND cheatBoxes[kCheatCount] = {};
+    bool cheats[kCheatCount] = {};
     template <typename Function> static Function User32(const char* name) {
         return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
     }
@@ -757,6 +774,7 @@ struct Launcher {
             self->play = LOWORD(wParam) == IDOK;
             self->borderless = SendMessageW(self->mode, CB_GETCURSEL, 0, 0) == 1;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
+            for (size_t i = 0; i < kCheatCount; ++i) self->cheats[i] = SendMessageW(self->cheatBoxes[i], BM_GETCHECK, 0, 0) == BST_CHECKED;
             DestroyWindow(hwnd);
             return 0;
         }
@@ -769,6 +787,7 @@ struct Launcher {
     }
     // Shows the settings and saves them when Play is pressed; false means the player closed the launcher instead.
     bool Run(const std::wstring& directory, HICON icon) {
+        for (size_t i = 0; i < kCheatCount; ++i) cheats[i] = ReadCheat(directory, kCheats[i]);
         borderless = ReadBorderless(directory);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
@@ -817,8 +836,13 @@ struct Launcher {
         // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
         control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
-        HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, 276, 92, 30, IDOK, font);
-        control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, 276, 92, 30, IDCANCEL, font);
+        control(L"BUTTON", L"Cheats", BS_GROUPBOX, 24, kCheatsTop, 392, kCheatsHeight, 0, font);
+        for (size_t i = 0; i < kCheatCount; ++i) {
+            cheatBoxes[i] = control(L"BUTTON", kCheats[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 44, kCheatsTop + 30 + 32 * static_cast<int>(i), 352, 28, kCheats[i].id, font);
+            SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, kButtonsTop, 92, 30, IDOK, font);
+        control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, kButtonsTop, 92, 30, IDCANCEL, font);
 
         SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Windowed"));
         SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Borderless Fullscreen"));
@@ -851,6 +875,13 @@ struct Launcher {
         if (previous != nullptr) aware(previous);
         DeleteObject(font);
         DeleteObject(heading);
+        for (size_t i = 0; i < kCheatCount; ++i) {
+            if (play && cheats[i] != ReadCheat(directory, kCheats[i]) &&
+                !WritePrivateProfileStringW(L"Cheats", kCheats[i].key, cheats[i] ? L"1" : L"0", (directory + kLauncherIni).c_str())) {
+                const std::wstring text = L"The " + std::wstring(kCheats[i].label) + L" setting could not be saved. It is used for this start only.";
+                MessageBoxW(nullptr, text.c_str(), kTitle, MB_OK | MB_ICONWARNING);
+            }
+        }
         if (play && chosen >= 0) {
             if (!WriteIntSetting(directory, kResolutionKey, chosen)) {
                 MessageBoxW(nullptr, L"The resolution could not be saved. The game starts with its current setting.", kTitle, MB_OK | MB_ICONWARNING);
@@ -937,10 +968,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
 
+    bool cheats[kCheatCount] = {};
     bool borderless = false;
     {
         Launcher launcher;
         if (!launcher.Run(directory, gameIcon)) return 0;
+        std::copy(std::begin(launcher.cheats), std::end(launcher.cheats), cheats);
         borderless = launcher.borderless;
     }
 
@@ -1018,6 +1051,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
     PROCESS_INFORMATION process{};
+    // The runtime reads the starting cheat states from its environment; a cheat that is off is removed, so an inherited value cannot turn it on.
+    for (size_t i = 0; i < kCheatCount; ++i) SetEnvironmentVariableW(kCheats[i].variable, cheats[i] ? L"1" : nullptr);
     std::wstring command = L"\"" + runtime + L"\"";
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process)) {
         Fail(L"The game could not be started.");

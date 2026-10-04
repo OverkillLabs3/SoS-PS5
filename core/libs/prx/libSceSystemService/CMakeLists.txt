@@ -1,4 +1,4 @@
-add_library(libSceSystemService SHARED EXCLUDE_FROM_ALL Export.cpp)
+add_library(libSceSystemService SHARED EXCLUDE_FROM_ALL Export.cpp Cheats.cpp)
 target_include_directories(libSceSystemService PRIVATE ${LIBS_INCLUDE_DIR})
 configure_windows_unwind(libSceSystemService)
 
