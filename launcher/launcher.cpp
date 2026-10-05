@@ -745,20 +745,23 @@ struct Launcher {
     // The layout stops growing at 175%; the window stays DPI aware, so above that it keeps its 175% size and text is still drawn sharply.
     static constexpr UINT kMaxLayoutDpi = 168;
     // Physical pixels kept free at the work-area edges when the window has to shrink or move to fit.
-    static constexpr int kWorkAreaMargin = 12;
-    // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
-    // monitors cannot add up rounding errors.
-    // The Cheats group gets one 32-pixel row per cheat and per cheat key; Play and Exit follow it, or only its header while it is collapsed.
-    static constexpr int kStartupTop = 272, kStartupHeight = 70;
+    static constexpr int kWorkAreaMargin = 24;
+    // Client area at 100% with both sections expanded. It and every control are scaled from these 96-DPI values, never from the current
+    // size, so moving between monitors cannot add up rounding errors.
+    // Each section group gets one 32-pixel row per option and cheat key; a collapsed section keeps only its header, and what follows moves up.
+    static constexpr int kQualityTop = 272, kQualityRows = 2, kQualityHeight = 70 + 32 * (kQualityRows - 1);
     static constexpr int kCheatRows = kCheatKeysRow + static_cast<int>(kCheatKeyCount);
-    static constexpr int kCheatsTop = kStartupTop + kStartupHeight + 12, kCheatsHeight = 70 + 32 * (kCheatRows - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
-    static constexpr int kHeaderTop = kCheatsTop - 4, kCollapsedButtonsTop = kHeaderTop + 30 + 16;
-    static constexpr int kWidth = 440, kHeight = kButtonsTop + 48, kCollapsedHeight = kCollapsedButtonsTop + 48;
-    static constexpr int kCheatsHeaderId = 109;
+    static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 70 + 32 * (kCheatRows - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
+    static constexpr int kHeaderOffset = 4, kCollapsedSection = 30 - kHeaderOffset;
+    static constexpr int kWidth = 440, kHeight = kButtonsTop + 48;
+    static constexpr int kCheatsHeaderId = 109, kQualityHeaderId = 110;
     struct Placed { HWND control; RECT bounds; HFONT* face; };
     HWND window = nullptr;
     HWND mode = nullptr;
     HWND resolution = nullptr;
+    HWND qualityHeader = nullptr;
+    std::vector<HWND> qualityContents;
+    bool qualityExpanded = false;
     HWND skip = nullptr;
     HFONT font = nullptr, heading = nullptr;
     std::vector<Placed> placed;
@@ -773,6 +776,8 @@ struct Launcher {
     HWND cheatsHeader = nullptr;
     std::vector<HWND> cheatContents;
     bool cheatsExpanded = false;
+    RECT togglePlace{};
+    LONG toggleLeftPlusRight = 0;
     template <typename Function> static Function User32(const char* name) {
         return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
     }
@@ -787,10 +792,10 @@ struct Launcher {
         return dpi != 0 ? dpi : USER_DEFAULT_SCREEN_DPI;
     }
     static int LayoutDpi(UINT dpi) { return static_cast<int>(min(dpi, kMaxLayoutDpi)); }
-    // While Cheats is expanded the layout goes below the capped DPI only as far as needed to fit the work area, and never below 100%.
+    // The layout goes below the capped DPI only as far as needed to fit the work area in the current state, and never below 100%.
     int LayoutDpi(UINT dpi, const RECT& work) const {
         int layoutDpi = LayoutDpi(dpi);
-        while (cheatsExpanded && layoutDpi > USER_DEFAULT_SCREEN_DPI && !Fits(WindowSize(dpi, layoutDpi), work)) --layoutDpi;
+        while (layoutDpi > USER_DEFAULT_SCREEN_DPI && !Fits(WindowSize(dpi, layoutDpi), work)) --layoutDpi;
         return layoutDpi;
     }
     static bool Fits(SIZE size, const RECT& work) {
@@ -802,7 +807,14 @@ struct Launcher {
         GetMonitorInfoW(monitor, &info);
         return info.rcWork;
     }
-    int Height() const { return cheatsExpanded ? kHeight : kCollapsedHeight; }
+    // How far a control placed at top moves up because of the collapsed sections above it.
+    int Shift(int top) const {
+        int shift = 0;
+        if (!qualityExpanded && top >= kCheatsTop - kHeaderOffset) shift -= kQualityHeight - kCollapsedSection;
+        if (!cheatsExpanded && top >= kButtonsTop) shift -= kCheatsHeight - kCollapsedSection;
+        return shift;
+    }
+    int Height() const { return kHeight + Shift(kHeight); }
     // Grows a client rectangle to the window rectangle; the caption and borders follow the real DPI.
     void Frame(RECT* rect, UINT dpi) const {
         const DWORD style = static_cast<DWORD>(GetWindowLongW(window, GWL_STYLE)), exStyle = static_cast<DWORD>(GetWindowLongW(window, GWL_EXSTYLE));
@@ -829,7 +841,7 @@ struct Launcher {
         for (const auto& item : placed) {
             SendMessageW(item.control, WM_SETFONT, reinterpret_cast<WPARAM>(*item.face), FALSE);
             RECT b = item.bounds;
-            if (!cheatsExpanded && b.top >= kButtonsTop) OffsetRect(&b, 0, kCollapsedButtonsTop - kButtonsTop);
+            OffsetRect(&b, 0, Shift(b.top));
             MoveWindow(item.control, scale(b.left), scale(b.top), scale(b.right) - scale(b.left), scale(b.bottom) - scale(b.top), FALSE);
         }
         if (oldFont != nullptr) DeleteObject(oldFont);
@@ -844,7 +856,7 @@ struct Launcher {
             placement.rcNormalPosition.bottom = placement.rcNormalPosition.top + size.cy;
             SetWindowPlacement(window, &placement);
         } else {
-            // Windows suggests the place after a DPI change and ToggleCheats after a toggle; at first the window is centered in the work area of its monitor.
+            // Windows suggests the place after a DPI change and Toggle after a toggle; at first the window is centered in the work area of its monitor.
             const int x = suggested != nullptr ? suggested->left : work.left + max(0L, work.right - work.left - size.cx) / 2;
             const int y = suggested != nullptr ? suggested->top : work.top + max(0L, work.bottom - work.top - size.cy) / 2;
             SetWindowPos(window, nullptr, x, y, size.cx, size.cy, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -856,25 +868,32 @@ struct Launcher {
         }
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
-    void ShowCheats() {
-        SetWindowTextW(cheatsHeader, cheatsExpanded ? L"\u25BE Cheats" : L"\u25B8 Cheats");
-        for (HWND control : cheatContents) ShowWindow(control, cheatsExpanded ? SW_SHOW : SW_HIDE);
+    static void ShowSection(HWND header, const wchar_t* title, const std::vector<HWND>& contents, bool expanded) {
+        SetWindowTextW(header, (std::wstring(expanded ? L"\u25BE " : L"\u25B8 ") + title).c_str());
+        for (HWND control : contents) ShowWindow(control, expanded ? SW_SHOW : SW_HIDE);
+    }
+    void ShowSections() {
+        ShowSection(qualityHeader, L"Quality of Life", qualityContents, qualityExpanded);
+        ShowSection(cheatsHeader, L"Cheats", cheatContents, cheatsExpanded);
     }
     // The window keeps its top and horizontal center and moves only as far as needed to stay inside the work area.
-    void ToggleCheats() {
-        if (std::find(cheatContents.begin(), cheatContents.end(), GetFocus()) != cheatContents.end()) SetFocus(cheatsHeader);
-        cheatsExpanded = !cheatsExpanded;
-        ShowCheats();
+    void Toggle(HWND header, const std::vector<HWND>& contents, bool& expanded) {
+        if (std::find(contents.begin(), contents.end(), GetFocus()) != contents.end()) SetFocus(header);
+        expanded = !expanded;
+        ShowSections();
         const UINT dpi = Dpi(window);
         const RECT work = WorkArea(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST));
         const SIZE size = ScaledSize(dpi, work);
         RECT place{};
         GetWindowRect(window, &place);
-        place.left = max(work.left, min((place.left + place.right - size.cx) / 2, work.right - kWorkAreaMargin - size.cx));
+        // Halving the width rounds, so the center of the first of several toggles is kept until the window is moved some other way.
+        if (!EqualRect(&place, &togglePlace)) toggleLeftPlusRight = place.left + place.right;
+        place.left = max(work.left, min((toggleLeftPlusRight - size.cx) / 2, work.right - kWorkAreaMargin - size.cx));
         place.top = max(work.top, min(place.top, work.bottom - kWorkAreaMargin - size.cy));
         place.right = place.left + size.cx;
         place.bottom = place.top + size.cy;
         Layout(dpi, &place);
+        GetWindowRect(window, &togglePlace);
     }
     static LRESULT CALLBACK Proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         auto* self = reinterpret_cast<Launcher*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -886,8 +905,12 @@ struct Launcher {
             if (self != nullptr) self->Layout(HIWORD(wParam), reinterpret_cast<const RECT*>(lParam));
             return 0;
         }
+        if (message == WM_COMMAND && self != nullptr && LOWORD(wParam) == kQualityHeaderId) {
+            self->Toggle(self->qualityHeader, self->qualityContents, self->qualityExpanded);
+            return 0;
+        }
         if (message == WM_COMMAND && self != nullptr && LOWORD(wParam) == kCheatsHeaderId) {
-            self->ToggleCheats();
+            self->Toggle(self->cheatsHeader, self->cheatContents, self->cheatsExpanded);
             return 0;
         }
         if (message == WM_COMMAND && self != nullptr && (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)) {
@@ -916,7 +939,8 @@ struct Launcher {
         damageMultiplier = ReadDamageMultiplier(directory);
         borderless = ReadBorderless(directory);
         skipIntro = ReadSkipIntro(directory);
-        // Cheats starts expanded when a cheat is on; collapsing or expanding it later is not stored.
+        // A section starts expanded when one of its options is on; collapsing or expanding it later is not stored.
+        qualityExpanded = skipIntro;
         cheatsExpanded = damageMultiplier != 1 || std::find(std::begin(cheats), std::end(cheats), true) != std::end(cheats);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
@@ -965,11 +989,15 @@ struct Launcher {
         // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
         control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
-        control(L"BUTTON", L"Startup", BS_GROUPBOX, 24, kStartupTop, 392, kStartupHeight, 0, font);
-        skip = control(L"BUTTON", L"Skip intro", BS_AUTOCHECKBOX | WS_TABSTOP, 44, kStartupTop + 30, 352, 28, 102, font);
-        cheatsHeader = control(L"BUTTON", nullptr, BS_PUSHBUTTON | WS_TABSTOP, 24, kHeaderTop, 92, 30, kCheatsHeaderId, font);
+        // Each header sits on its group's top edge; WS_CLIPSIBLINGS keeps the frame from being drawn over it.
+        qualityHeader = control(L"BUTTON", nullptr, BS_PUSHBUTTON | WS_TABSTOP, 24, kQualityTop - kHeaderOffset, 140, 30, kQualityHeaderId, font);
+        const size_t firstQuality = placed.size();
+        control(L"BUTTON", nullptr, BS_GROUPBOX | WS_CLIPSIBLINGS, 24, kQualityTop, 392, kQualityHeight, 0, font);
+        skip = control(L"BUTTON", L"Skip intro", BS_AUTOCHECKBOX | WS_TABSTOP, 44, kQualityTop + 30, 352, 28, 102, font);
+        control(L"BUTTON", L"Skip dialogue", BS_CHECKBOX | WS_TABSTOP | WS_DISABLED, 44, kQualityTop + 30 + 32, 352, 28, 111, font);
+        for (size_t i = firstQuality; i < placed.size(); ++i) qualityContents.push_back(placed[i].control);
+        cheatsHeader = control(L"BUTTON", nullptr, BS_PUSHBUTTON | WS_TABSTOP, 24, kCheatsTop - kHeaderOffset, 92, 30, kCheatsHeaderId, font);
         const size_t firstCheat = placed.size();
-        // The header sits on the group's top edge; WS_CLIPSIBLINGS keeps the frame from being drawn over it.
         control(L"BUTTON", nullptr, BS_GROUPBOX | WS_CLIPSIBLINGS, 24, kCheatsTop, 392, kCheatsHeight, 0, font);
         for (size_t i = 0; i < kCheatCount; ++i) {
             cheatBoxes[i] = control(L"BUTTON", kCheats[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 44, kCheatsTop + 30 + 32 * kCheats[i].row, 352, 28, kCheats[i].id, font);
@@ -1011,7 +1039,7 @@ struct Launcher {
         }
         SendMessageW(resolution, CB_SETCURSEL, selected, 0);
 
-        ShowCheats();
+        ShowSections();
         Layout(Dpi(window), nullptr);
         ShowWindow(window, SW_SHOWNORMAL);
         SetForegroundWindow(window);
