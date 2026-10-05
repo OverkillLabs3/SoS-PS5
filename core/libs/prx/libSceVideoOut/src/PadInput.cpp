@@ -230,6 +230,9 @@ PadInputState PadInput::sampleController() const {
     addButton(SDL_CONTROLLER_BUTTON_Y, Pad::PadButton::Triangle);
     addButton(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, Pad::PadButton::L1);
     addButton(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, Pad::PadButton::R1);
+    // PS4/PS5 pads report Share/Create as BACK and have a real touchpad; elsewhere BACK is View/Select.
+    const auto type = SDL_GameControllerGetType(controller);
+    if (type != SDL_CONTROLLER_TYPE_PS4 && type != SDL_CONTROLLER_TYPE_PS5) addButton(SDL_CONTROLLER_BUTTON_BACK, Pad::PadButton::TouchPad);
     addButton(SDL_CONTROLLER_BUTTON_START, Pad::PadButton::Options);
     addButton(SDL_CONTROLLER_BUTTON_LEFTSTICK, Pad::PadButton::L3);
     addButton(SDL_CONTROLLER_BUTTON_RIGHTSTICK, Pad::PadButton::R3);

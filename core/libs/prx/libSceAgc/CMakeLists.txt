@@ -102,6 +102,21 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+add_test_executable(agc_interpolant_mapping_tests EXCLUDE_FROM_ALL tests/InterpolantMapping.cpp)
+target_include_directories(agc_interpolant_mapping_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_interpolant_mapping_tests PRIVATE libSceAgc libc)
+set_target_properties(agc_interpolant_mapping_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_interpolant_mapping_tests)
+
+if(BUILD_TESTING)
+    set_target_properties(agc_interpolant_mapping_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_interpolant_mapping COMMAND agc_interpolant_mapping_tests)
+    if(WIN32)
+        set_tests_properties(agc_interpolant_mapping PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 if(BUILD_TESTING)
     add_test_executable(guest_shader_link_tests ${LIBS_INCLUDE_DIR}/tests/GuestShaderLink.cpp)
     target_include_directories(guest_shader_link_tests PRIVATE ${LIBS_INCLUDE_DIR})
