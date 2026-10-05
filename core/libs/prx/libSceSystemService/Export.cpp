@@ -1,11 +1,75 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include "prx/libc/include/Shutdown.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceSystemService/SystemService.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#ifdef _WIN32
+namespace {
+
+// SOS_SKIP_INTRO=1 jumps UiScripts.SplashScreen.Start (<Start>d__20.MoveNext) from its first state to its own ending, which must first
+// wait for the save system and the settings defaults that the intro used to outlast. Patched when this library loads, before any game code.
+bool SkipStartupPresentation() {
+    const char* option = std::getenv("SOS_SKIP_INTRO");
+    if (option == nullptr || std::strcmp(option, "1") != 0) return false;
+
+    constexpr std::uint32_t coroutine = 0xc61f40, coroutineEnd = 0xc62d00;
+    constexpr std::uint64_t coroutineHash = 0x9f43bcbea9a0a0d9;
+    constexpr std::uint32_t firstState = 0xc6205a;
+    constexpr std::uint32_t ending = 0xc624f7;
+    constexpr std::uint32_t saveCheck = 0xc6252f;
+    constexpr std::uint32_t saveReady = 0xc6253a;
+    constexpr std::uint32_t nextFrame = 0xc62b5b;   // yield null as state 4, which resumes into the ending while the video is not playing
+    constexpr std::uint32_t userSkip = 0xc62479;    // the video loop's skip branch, unreachable without the video
+
+    auto* game = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(L"Il2cppUserAssemblies.prx.guest.prx"));
+    const auto* headers = game != nullptr ? reinterpret_cast<const IMAGE_NT_HEADERS*>(game + reinterpret_cast<const IMAGE_DOS_HEADER*>(game)->e_lfanew) : nullptr;
+
+    // Only the analysed game build is patched (FNV-1a of the whole coroutine, which has no relocations); anything else plays the intro.
+    std::uint64_t hash = 0xcbf29ce484222325;
+    if (headers != nullptr && headers->OptionalHeader.SizeOfImage >= coroutineEnd) {
+        for (std::uint32_t offset = coroutine; offset < coroutineEnd; ++offset) hash = (hash ^ game[offset]) * 0x100000001b3;
+    }
+    if (hash != coroutineHash) {
+        std::fprintf(stderr, "Skip intro: the startup screen code was not recognised, the intro plays\n");
+        return false;
+    }
+
+    const auto jump = [game](std::uint32_t from, std::uint32_t to) {
+        const auto distance = static_cast<std::int32_t>(to - (from + 5));
+        game[from] = 0xe9;
+        std::memcpy(game + from + 1, &distance, sizeof(distance));
+    };
+    // rax = save system: wait unless isInitialized (+0x11) and currentGlobalData (+0x20)->previouslyInitializedToDefaults (+0x1c),
+    // followed by jmp saveReady and wait: jmp nextFrame.
+    constexpr std::uint8_t waitForSaveSystem[] = {0x48, 0x85, 0xc0, 0x74, 0x1a, 0x80, 0x78, 0x11, 0x01, 0x75, 0x14, 0x48, 0x8b, 0x48,
+                                                  0x20, 0x48, 0x85, 0xc9, 0x74, 0x0b, 0x80, 0x79, 0x1c, 0x00, 0x74, 0x05};
+
+    DWORD protection = 0;
+    if (!VirtualProtect(game + coroutine, coroutineEnd - coroutine, PAGE_EXECUTE_READWRITE, &protection)) return false;
+
+    std::memcpy(game + userSkip, waitForSaveSystem, sizeof(waitForSaveSystem));
+    jump(userSkip + sizeof(waitForSaveSystem), saveReady);
+    jump(userSkip + sizeof(waitForSaveSystem) + 5, nextFrame);
+    jump(saveCheck, userSkip);
+    jump(firstState, ending);
+
+    VirtualProtect(game + coroutine, coroutineEnd - coroutine, protection, &protection);
+    FlushInstructionCache(GetCurrentProcess(), game + coroutine, coroutineEnd - coroutine);
+    return true;
+}
+
+[[maybe_unused]] const bool startupPresentationSkipped = SkipStartupPresentation();
+
+}
+#endif
 
 extern "C" {
 

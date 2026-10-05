@@ -6,6 +6,7 @@
 #include <string_view>
 #include "SceTypes.hpp"
 #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
+#include "prx/libSceAvPlayer/include/SafeTransition.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
@@ -81,13 +82,13 @@ extern "C" {
 int APS5_VABI sceAvPlayerAddSource(AvPlayerInternal* h, const char* filename) {
     AvpTrace("sceAvPlayerAddSource");
     if (!h || !filename) return SCE_AVPLAYER_ERROR_INVALID_PARAMS;
-    { const int r = ToPlayer(h)->AddSource(filename, SourceTypeUnknown); AvpTrace("  AddSource result", r, true); return r; }
+    { const int r = SafeTransition::AddSource([&] { return ToPlayer(h)->AddSource(filename, SourceTypeUnknown); }); AvpTrace("  AddSource result", r, true); return r; }
 }
 
 int APS5_VABI sceAvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type, const AvPlayerSourceDetails* source_details) {
     AvpTrace("sceAvPlayerAddSourceEx");
     if (!h || uri_type != 0 || !source_details || !source_details->uri.name) return SCE_AVPLAYER_ERROR_INVALID_PARAMS;
-    { std::fprintf(stderr, "[avp] AddSourceEx uri=%.*s type=%u\n", static_cast<int>(source_details->uri.length), source_details->uri.name, source_details->source_type); const int r = ToPlayer(h)->AddSource(std::string_view(source_details->uri.name, source_details->uri.length), source_details->source_type); AvpTrace("  AddSourceEx result", r, true); return r; }
+    { std::fprintf(stderr, "[avp] AddSourceEx uri=%.*s type=%u\n", static_cast<int>(source_details->uri.length), source_details->uri.name, source_details->source_type); const int r = SafeTransition::AddSource([&] { return ToPlayer(h)->AddSource(std::string_view(source_details->uri.name, source_details->uri.length), source_details->source_type); }); AvpTrace("  AddSourceEx result", r, true); return r; }
 }
 
 int APS5_VABI sceAvPlayerChangeStream(AvPlayerInternal* h, uint32_t old_stream_id, uint32_t new_stream_id) {

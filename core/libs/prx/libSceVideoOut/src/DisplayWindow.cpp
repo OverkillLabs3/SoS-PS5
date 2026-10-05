@@ -1,6 +1,7 @@
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
+#include "prx/libkernel/HostExtension/include/HostExtension.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "SDL_vulkan.h"
 #include <cstdio>
@@ -128,8 +129,10 @@ void DisplayWindow::UpdateTitle() {
         fpsStart = now;
         fpsFrames = 0;
     }
-    char text[160];
-    std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
+    char status[256];
+    HostTitleStatus_nid_no_patch(status, sizeof(status));
+    char text[320];
+    std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)%s", title.value, currentFps, static_cast<unsigned long long>(frameNum), status);
     SDL_SetWindowTitle(window, text);
 }
 
