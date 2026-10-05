@@ -97,6 +97,23 @@ void DisplayWindow::ToggleFullscreen() {
     require(window != nullptr, "window must exist before toggling fullscreen");
     const auto flags = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0 ? 0u : static_cast<Uint32>(SDL_WINDOW_FULLSCREEN_DESKTOP);
     require(SDL_SetWindowFullscreen(window, flags) == 0, SDL_GetError());
+    lastMouseMotion = SDL_GetTicks64();
+}
+
+void DisplayWindow::HandleEvent(const SDL_Event& event) {
+    if (window != nullptr && event.type == SDL_MOUSEMOTION && event.motion.windowID == SDL_GetWindowID(window)) lastMouseMotion = SDL_GetTicks64();
+}
+
+// Restarting the timer while windowed or unfocused gives entering or returning to fullscreen a fresh delay.
+void DisplayWindow::UpdateCursor() {
+    if (window == nullptr) return;
+    const auto now = SDL_GetTicks64();
+    const auto flags = SDL_GetWindowFlags(window);
+    if ((flags & SDL_WINDOW_FULLSCREEN) == 0 || (flags & SDL_WINDOW_INPUT_FOCUS) == 0) lastMouseMotion = now;
+    const bool hide = now - lastMouseMotion >= DisplayWindowCursorHideDelayMs;
+    if (hide == cursorHidden) return;
+    cursorHidden = hide;
+    SDL_ShowCursor(hide ? SDL_DISABLE : SDL_ENABLE);
 }
 
 void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) const {
