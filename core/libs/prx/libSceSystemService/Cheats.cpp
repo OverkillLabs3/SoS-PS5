@@ -16,12 +16,12 @@
 
 namespace {
 
-// Sons of Sparta cheats, for the player only and used while playing: F1 God Mode and F2 Infinite Spartan Spirit are switched on and off,
-// F4 adds 1000 Blood Orbs and F5 adds 10 of each upgrade material (F3 is kept for a future Infinite Magic). The launcher passes the
-// starting states of the two switches as SOS_GOD_MODE=1 and SOS_INFINITE_SPARTAN_SPIRIT=1. When this library loads, before any game code
-// runs, each of them whose game code is recognised gets its hooks in Il2cppUserAssemblies; the hooks stay for the whole session, the keys
-// only switch the states or ask for an addition, and the window title lists the cheats that are on. No two of them share a hook. Offsets
-// are module RVAs.
+// Sons of Sparta cheats, for the player only and used while playing: F1 God Mode, F2 Infinite Spartan Spirit and F6 Movement Speed 2x are
+// switched on and off, F4 adds 1000 Blood Orbs and F5 adds 10 of each upgrade material (F3 is kept for a future Infinite Magic). The
+// launcher passes the starting states of the three switches as SOS_GOD_MODE=1, SOS_INFINITE_SPARTAN_SPIRIT=1 and SOS_MOVEMENT_SPEED=1.
+// When this library loads, before any game code runs, each of them whose game code is recognised gets its hooks in Il2cppUserAssemblies;
+// the hooks stay for the whole session, the keys only switch the states or ask for an addition, and the window title lists the cheats
+// that are on. No two of them share a hook. Offsets are module RVAs.
 //
 // God Mode: health only changes through EntityComponents.Vitals.OffsetHp, and grey health through Vitals.OffsetGreyHp. Grey health is
 // the part of the health bar shown as lost until it recovers: the green bar is health minus grey health. LivingDamageable.ReceiveDamage
@@ -42,6 +42,14 @@ namespace {
 // objects must not be touched on the window thread, so a key only asks for its action; the next PlayerController.Update (empty, called by
 // the game every frame for the player's controller) finds the wallet of the player that controller plays and the items the way a save
 // loads them, and adds. F4 and F5 do nothing while either action waits or runs, and an action no player picks up within a second fails.
+// Movement Speed 2x: walking, running and steering in the air move a character by a delta its movement state sets every physics step from
+// the movement input (CharacterMovement.UseAsMovementDelta: direction * fixedDeltaTime * movementSpeed * the state's factor), which
+// PlayerMovement.MovementTick may then scale (in the air, under root motion). PlayerMovement.TickPseudoPhysics, which only the player's
+// movement runs (enemies run CharacterMovement's), aligns that delta with the slope through one call to
+// CharacterMovement.GetSlopeAlignedVersionOfMovementDelta, then adds the physics velocity (gravity, jumps, knockback) and root motion.
+// That call is redirected to MovementInputDelta, which makes it and doubles its result for the player while the cheat is on. Nothing is
+// stored, so every step moves exactly twice the game's own amount, and switching it off gives the game's amount from the next step; the
+// physics velocity, root motion, other characters and the game's time are not touched.
 
 struct Cheat {
     const char* name;      // in the log
@@ -55,6 +63,7 @@ struct Cheat {
 };
 Cheat godMode{"God Mode", "God Mode", "SOS_GOD_MODE"};
 Cheat infiniteSpirit{"Infinite Spartan Spirit", "Spartan Spirit", "SOS_INFINITE_SPARTAN_SPIRIT"};
+Cheat movementSpeed{"Movement Speed 2x", "Movement Speed", "SOS_MOVEMENT_SPEED"};
 
 // A wallet item an action adds.
 struct WalletItem {
@@ -105,8 +114,8 @@ Award upgradeMaterials{"Upgrade Materials", " +10", kUpgradeMaterials, std::size
 const char* awardsUnavailable = "game code not recognised";
 const char* const kUnavailable = ": unavailable";
 
-// SDL scancodes of the cheat keys; F3 (60) is kept for Infinite Magic and F6 to F10 for later cheats, F11 is the runtime's fullscreen.
-constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kBloodOrbsKey = 61, kUpgradeMaterialsKey = 62;
+// SDL scancodes of the cheat keys; F3 (60) is kept for Infinite Magic and F7 to F10 for later cheats, F11 is the runtime's fullscreen.
+constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kBloodOrbsKey = 61, kUpgradeMaterialsKey = 62, kMovementSpeedKey = 63;
 constexpr std::uint64_t kNoticeMs = 2000;
 constexpr std::uint64_t kAwardWaitMs = 1000;  // how long a requested action waits for the player's controller
 
@@ -127,11 +136,14 @@ constexpr std::uint32_t kGetItem = 0x8c91b0;           // PersistentData.PlayerI
 constexpr std::uint32_t kTryGetWallet = 0x8c0810;      // RuntimeData.PlayerRuntimeDataUtils.TryGetWallet(GameObject)
 constexpr std::uint32_t kGetAmount = 0x8ce2b0;         // PersistentData.PlayerWallet.GetCurrentAmount(ItemDefinition)
 constexpr std::uint32_t kAddToWallet = 0x8ce430;       // PersistentData.PlayerWallet.AddToWallet(ItemDefinition, long, bool?)
+constexpr std::uint32_t kInputDeltaCall = 0x7067a9;    // PlayerMovement.TickPseudoPhysics: the slope-aligned movement input delta
+constexpr std::uint32_t kSlopeAligned = 0x6ecf20;      // CharacterMovement.GetSlopeAlignedVersionOfMovementDelta(Vector2)
 
 constexpr std::size_t kNativeObject = 0x10;                                       // UnityEngine.Object.m_CachedPtr, null once destroyed
 constexpr std::size_t kMaxHp = 0x38, kCurrentHp = 0x40, kGreyHp = 0x44, kDead = 0x48;  // Vitals
 constexpr std::size_t kCurrentSpirit = 0x20, kMaxSpirit = 0x24;                   // SpartanSpirit
 constexpr std::size_t kWalletCount = 0x20;  // PlayerWallet.walletCount (item -> count), created by the first addition
+constexpr std::size_t kInputDelta = 0xe0;   // CharacterMovement.deltaFromMovementInputsThisFrame (Vector2)
 
 using GetGameObject = void*(APS5_VABI*)(void* component);
 using IsPlayer = bool(APS5_VABI*)(void* gameObject, const void* method);
@@ -148,6 +160,10 @@ struct NullableBool {
     bool value;
 };
 using AddToWallet = void(APS5_VABI*)(void* wallet, void* item, std::int64_t count, NullableBool overrideDontShowNotification, const void* method);
+struct Vector2 {
+    float x, y;
+};
+using SlopeAligned = Vector2(APS5_VABI*)(void* movement, Vector2 moveDelta, const void* method);
 
 template <typename T> T& Field(void* object, std::size_t offset) { return *reinterpret_cast<T*>(static_cast<std::uint8_t*>(object) + offset); }
 template <typename Function> Function Game(std::uint32_t offset) { return reinterpret_cast<Function>(game + offset); }
@@ -260,6 +276,27 @@ bool APS5_VABI SpiritFilter(void* spirit, void*, void*, float* amount) {
     Field<float>(spirit, kCurrentSpirit) = Field<float>(spirit, kMaxSpirit);
     *amount = 0.0f;
     return false;
+}
+
+// DEBUG_SAULO: temporary Movement Speed diagnostics, remove before commit: one line for the first non-zero player movement the cheat doubles
+// after it is switched on, so the log shows the game's value and the doubled one without a line per physics step.
+std::atomic<bool> DEBUG_SAULO_movementLogged{false};
+// DEBUG_SAULO
+__attribute__((noinline)) void DEBUG_SAULO_MovementDelta(Vector2 original) {
+    if (DEBUG_SAULO_movementLogged.exchange(true)) return;
+    std::fprintf(stderr, "[DEBUG_SAULO] Movement Speed player delta original=(%.6f, %.6f) modified=(%.6f, %.6f)\n", static_cast<double>(original.x),
+        static_cast<double>(original.y), static_cast<double>(original.x * 2.0f), static_cast<double>(original.y * 2.0f));
+    std::fflush(stderr);
+}
+
+// Called by PlayerMovement.TickPseudoPhysics(this, ...) every physics step in place of
+// GetSlopeAlignedVersionOfMovementDelta(this, deltaFromMovementInputsThisFrame): the same result, doubled for the player with Movement
+// Speed 2x on.
+Vector2 APS5_VABI MovementInputDelta(void* movement) {
+    const Vector2 delta = Game<SlopeAligned>(kSlopeAligned)(movement, Field<Vector2>(movement, kInputDelta), nullptr);
+    if (!movementSpeed.on.load(std::memory_order_relaxed) || !OnPlayer(movement)) return delta;
+    if (!DEBUG_SAULO_movementLogged.load(std::memory_order_relaxed) && (delta.x != 0.0f || delta.y != 0.0f)) DEBUG_SAULO_MovementDelta(delta);  // DEBUG_SAULO
+    return {delta.x * 2.0f, delta.y * 2.0f};
 }
 
 // Logs the result of one action and shows it in the window title for two seconds; another result restarts that time. item names the
@@ -492,8 +529,27 @@ bool Hook(const Patch& patch) {
     return true;
 }
 
-// A cheat whose game code is not recognised stays off and unavailable; the other one is not affected.
-void Start(Cheat& cheat, bool recognised, std::initializer_list<Patch> patches) {
+// The call MovementInputDelta replaces: vmovsd xmm0, qword ptr [rbx + 0xe0]; mov rdi, rbx; call GetSlopeAlignedVersionOfMovementDelta. It
+// becomes mov rdi, rbx; mov rax, MovementInputDelta; call rax; nop, at the same stack depth. rax is free there (the call returns in xmm0
+// and rax is written before it is read again), and the only jump into these bytes lands on the first one.
+constexpr std::uint8_t kInputDeltaCallBytes[] = {0xc5, 0xfb, 0x10, 0x83, 0xe0, 0x00, 0x00, 0x00, 0x48, 0x89, 0xdf, 0xe8, 0x67, 0x67, 0xfe, 0xff};
+
+bool RedirectInputDelta() {
+    std::uint8_t* site = game + kInputDeltaCall;
+    if (std::memcmp(site, kInputDeltaCallBytes, sizeof(kInputDeltaCallBytes)) != 0) return false;
+    std::uint8_t call[sizeof(kInputDeltaCallBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0x90};
+    const auto function = &MovementInputDelta;
+    std::memcpy(call + 5, &function, sizeof(function));
+    DWORD protection = 0;
+    if (!VirtualProtect(site, sizeof(call), PAGE_EXECUTE_READWRITE, &protection)) return false;
+    std::memcpy(site, call, sizeof(call));
+    VirtualProtect(site, sizeof(call), protection, &protection);
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(call));
+    return true;
+}
+
+// A cheat whose game code is not recognised stays off and unavailable; the others are not affected. redirect, if any, patches a call.
+void Start(Cheat& cheat, bool recognised, std::initializer_list<Patch> patches, bool (*redirect)() = nullptr) {
     const char* value = std::getenv(cheat.variable);
     const bool on = value != nullptr && std::strcmp(value, "1") == 0;
     std::fprintf(stderr, "%s: %s\n", cheat.name, on ? "ON" : "OFF");
@@ -507,6 +563,10 @@ void Start(Cheat& cheat, bool recognised, std::initializer_list<Patch> patches) 
             return;
         }
     }
+    if (redirect != nullptr && !redirect()) {
+        std::fprintf(stderr, "%s: game code could not be patched, cheat disabled\n", cheat.name);
+        return;
+    }
     cheat.hooked = true;
     cheat.on.store(on);
     std::fprintf(stderr, "%s: patch applied\n", cheat.name);
@@ -518,7 +578,10 @@ void OnKey(int scancode) {
         Request(scancode == kBloodOrbsKey ? bloodOrbs : upgradeMaterials);
         return;
     }
-    Cheat* cheat = scancode == kGodModeKey ? &godMode : scancode == kInfiniteSpiritKey ? &infiniteSpirit : nullptr;
+    Cheat* cheat = scancode == kGodModeKey ? &godMode
+                 : scancode == kInfiniteSpiritKey ? &infiniteSpirit
+                 : scancode == kMovementSpeedKey ? &movementSpeed
+                                                 : nullptr;
     if (cheat == nullptr) return;
     const char* notice = "unavailable";
     if (cheat->hooked) {
@@ -528,6 +591,11 @@ void OnKey(int scancode) {
     }
     std::fprintf(stderr, "%s: %s\n", cheat->name, notice != nullptr ? notice : "ON");
     if (cheat == &godMode && cheat->hooked) std::fprintf(stderr, "[DEBUG_SAULO] GodMode F1 toggle %s\n", cheat->on.load() ? "ON" : "OFF");  // DEBUG_SAULO
+    // DEBUG_SAULO
+    if (cheat == &movementSpeed && cheat->hooked) {
+        DEBUG_SAULO_movementLogged.store(false);
+        DEBUG_SAULO_Log("[DEBUG_SAULO] Movement Speed F6 toggle %s\n", cheat->on.load() ? "ON" : "OFF");
+    }
     cheat->notice.store(notice);
     cheat->noticeUntil.store(notice != nullptr ? NowMs() + kNoticeMs : 0);
 }
@@ -539,7 +607,7 @@ void TitleStatus(char* text, std::size_t size) {
     ExpireRequest(now);
     std::size_t used = 0;
     if (size != 0) text[0] = '\0';
-    for (const Cheat* cheat : {&godMode, &infiniteSpirit}) {
+    for (const Cheat* cheat : {&godMode, &infiniteSpirit, &movementSpeed}) {
         const char* state = cheat->on.load() ? "ON" : now < cheat->noticeUntil.load() ? cheat->notice.load() : nullptr;
         if (state == nullptr || used >= size) continue;
         const int written = std::snprintf(text + used, size - used, " | %s: %s", cheat->label, state);
@@ -591,6 +659,21 @@ bool StartCheats() {
         std::fprintf(stderr, "Blood Orbs and Upgrade Materials: %s, keys disabled\n", awardsUnavailable);
     } else {
         std::fprintf(stderr, "Blood Orbs and Upgrade Materials: patch applied\n");
+    }
+    // Movement Speed 2x: PlayerMovement.TickPseudoPhysics (with the call it redirects), CharacterMovement.GetSlopeAlignedVersionOfMovementDelta,
+    // the CharacterMovement.UseAsMovementDelta overloads that set the delta, PlayerMovement.MovementTick that scales it and calls
+    // TickPseudoPhysics, PawnUtils.GetMyController and IsPlayer.
+    const bool movementRecognised = fits && Hash({{0x706620, 0x706b50}, {0x6ecf20, 0x6ed280}, {0x6f02e0, 0x6f06d0}, {0x708d70, 0x709360},
+        {0x80ecd0, 0x80f0b0}}) == 0xe4fb67f213ff4921;
+    DEBUG_SAULO_Log("[DEBUG_SAULO] Movement Speed hook install call=0x%llx slopeAligned=0x%llx inputDelta=+0x%zx fingerprint %s\n",  // DEBUG_SAULO
+        DEBUG_SAULO_Address(game + kInputDeltaCall), DEBUG_SAULO_Address(game + kSlopeAligned), kInputDelta, movementRecognised ? "OK" : "FAILED");  // DEBUG_SAULO
+    Start(movementSpeed, movementRecognised, {}, RedirectInputDelta);
+    // DEBUG_SAULO
+    if (movementSpeed.hooked) {
+        void* target = nullptr;
+        std::memcpy(&target, game + kInputDeltaCall + 5, sizeof(target));
+        DEBUG_SAULO_Log("[DEBUG_SAULO] Movement Speed patch applied call=0x%llx now calls 0x%llx\n", DEBUG_SAULO_Address(game + kInputDeltaCall),
+            DEBUG_SAULO_Address(target));
     }
     HostExtensionRegister_nid_no_patch(OnKey, TitleStatus);
     return true;

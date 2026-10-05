@@ -49,13 +49,16 @@ const Resolution kResolutions[] = {{0, L"3840 x 2160 (4K)"}, {6, L"2560 x 1440 (
 const wchar_t* kLauncherIni = L"\\launcher.ini";
 
 // [Cheats] in launcher.ini holds the state each cheat starts with; the runtime gets it from the variable and its key switches it while playing.
-struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; };
-const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103},
-                         {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104}};
+// Each has a row in the Cheats group, which lists the cheats and the cheat keys in key order.
+struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int row; };
+const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0},
+                         {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 1},
+                         {L"movement_speed", L"Movement Speed 2x (F6)", L"SOS_MOVEMENT_SPEED", 105, 4}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
-// Keys that add something once while playing; they are listed for information, nothing about them is stored.
+// Keys that add something once while playing, in the rows from kCheatKeysRow; they are listed for information, nothing about them is stored.
 const wchar_t* const kCheatKeys[] = {L"F4  Add 1000 Blood Orbs", L"F5  Add 10 Upgrade Materials"};
 constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
+constexpr int kCheatKeysRow = 2;
 
 // Only the value 1 turns a cheat on; a missing file, section or key, or any other value, leaves it off.
 bool ReadCheat(const std::wstring& directory, const Cheat& cheat) {
@@ -842,11 +845,11 @@ struct Launcher {
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
         control(L"BUTTON", L"Cheats", BS_GROUPBOX, 24, kCheatsTop, 392, kCheatsHeight, 0, font);
         for (size_t i = 0; i < kCheatCount; ++i) {
-            cheatBoxes[i] = control(L"BUTTON", kCheats[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 44, kCheatsTop + 30 + 32 * static_cast<int>(i), 352, 28, kCheats[i].id, font);
+            cheatBoxes[i] = control(L"BUTTON", kCheats[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 44, kCheatsTop + 30 + 32 * kCheats[i].row, 352, 28, kCheats[i].id, font);
             SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         for (size_t i = 0; i < kCheatKeyCount; ++i) {
-            control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, 44, kCheatsTop + 30 + 32 * static_cast<int>(kCheatCount + i), 352, 28, 0, font);
+            control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, 44, kCheatsTop + 30 + 32 * (kCheatKeysRow + static_cast<int>(i)), 352, 28, 0, font);
         }
         HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, kButtonsTop, 92, 30, IDOK, font);
         control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, kButtonsTop, 92, 30, IDCANCEL, font);
