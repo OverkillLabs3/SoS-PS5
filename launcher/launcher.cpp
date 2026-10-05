@@ -50,9 +50,12 @@ const wchar_t* kLauncherIni = L"\\launcher.ini";
 
 // [Cheats] in launcher.ini holds the state each cheat starts with; the runtime gets it from the variable and its key switches it while playing.
 struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; };
-const Cheat kCheats[] = {{L"god_mode", L"God Mode", L"SOS_GOD_MODE", 103},
-                         {L"infinite_spartan_spirit", L"Infinite Spartan Spirit", L"SOS_INFINITE_SPARTAN_SPIRIT", 104}};
+const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103},
+                         {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
+// Keys that add something once while playing; they are listed for information, nothing about them is stored.
+const wchar_t* const kCheatKeys[] = {L"F4  Add 1000 Blood Orbs", L"F5  Add 10 Upgrade Materials"};
+constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
 
 // Only the value 1 turns a cheat on; a missing file, section or key, or any other value, leaves it off.
 bool ReadCheat(const std::wstring& directory, const Cheat& cheat) {
@@ -679,8 +682,9 @@ struct Launcher {
     static constexpr UINT kMaxLayoutDpi = 168;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors.
-    // The Cheats group gets one 32-pixel row per cheat; Play and Exit follow it.
-    static constexpr int kCheatsTop = 272, kCheatsHeight = 70 + 32 * static_cast<int>(kCheatCount - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
+    // The Cheats group gets one 32-pixel row per cheat and per cheat key; Play and Exit follow it.
+    static constexpr int kCheatRows = static_cast<int>(kCheatCount + kCheatKeyCount);
+    static constexpr int kCheatsTop = 272, kCheatsHeight = 70 + 32 * (kCheatRows - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 440, kHeight = kButtonsTop + 48;
     struct Placed { HWND control; RECT bounds; HFONT* face; };
     HWND window = nullptr;
@@ -840,6 +844,9 @@ struct Launcher {
         for (size_t i = 0; i < kCheatCount; ++i) {
             cheatBoxes[i] = control(L"BUTTON", kCheats[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 44, kCheatsTop + 30 + 32 * static_cast<int>(i), 352, 28, kCheats[i].id, font);
             SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        for (size_t i = 0; i < kCheatKeyCount; ++i) {
+            control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, 44, kCheatsTop + 30 + 32 * static_cast<int>(kCheatCount + i), 352, 28, 0, font);
         }
         HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, kButtonsTop, 92, 30, IDOK, font);
         control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, kButtonsTop, 92, 30, IDCANCEL, font);
