@@ -16,10 +16,10 @@
 
 namespace {
 
-// Sons of Sparta cheats, for the player only and used while playing: F1 God Mode, F2 Infinite Spartan Spirit, F5 Movement Speed 2x and
-// F6 Jump Height 2x are switched on and off, F7 adds 1000 Blood Orbs and F8 adds 10 of each upgrade material (F3 and F4 are kept for a
-// future Infinite Magic and Damage 2x). The launcher passes the starting states of the four switches as SOS_GOD_MODE=1,
-// SOS_INFINITE_SPARTAN_SPIRIT=1, SOS_MOVEMENT_SPEED=1 and SOS_JUMP_HEIGHT=1. When this library loads, before any game code runs, each of them whose game code is recognised gets its hooks in Il2cppUserAssemblies;
+// Sons of Sparta cheats, for the player only and used while playing: F1 God Mode, F2 Infinite Spartan Spirit, F3 Infinite Magic,
+// F5 Movement Speed 2x and F6 Jump Height 2x are switched on and off, F7 adds 1000 Blood Orbs and F8 adds 10 of each upgrade material (F4
+// is kept for a future Damage 2x). The launcher passes the starting states of the five switches as SOS_GOD_MODE=1,
+// SOS_INFINITE_SPARTAN_SPIRIT=1, SOS_INFINITE_MAGIC=1, SOS_MOVEMENT_SPEED=1 and SOS_JUMP_HEIGHT=1. When this library loads, before any game code runs, each of them whose game code is recognised gets its hooks in Il2cppUserAssemblies;
 // the hooks stay for the whole session, the keys only switch the states or ask for an addition, and the window title lists the cheats
 // that are on. No two of them share a hook. Offsets are module RVAs.
 //
@@ -34,6 +34,14 @@ namespace {
 // the health directly (Vitals.MarkAsDead) still kill.
 // Infinite Spartan Spirit: every change of the meter (spending, block costs, regeneration every frame) goes through
 // EntityComponents.SpartanSpirit.OffsetSpartanSpirit; for the player the meter is set to its maximum and the change to 0.
+// Infinite Magic: the game calls magic mana. Every change of the player's mana goes through EntityComponents.ManaState.OffsetMana: what
+// abilities spend (EventModule_AffectMana), changes per second (TickModule_OffsetManaPerSec), recovery and the pit's refill. It sets
+// currentMana to currentMana + the change kept within 0 and currentMaxMana, then raises OnManaChanged (and, unless the change is
+// regeneration, OnManaChangedExcludingRegeneration), which the mana bar follows; the game's mana checks read currentMana. The method's
+// first instructions read a rip-relative flag, so it cannot get the entry hook God Mode and Spirit use; instead its computation of the new value
+// is replaced by a call to ManaAfterOffset, which computes the same value and, for the player while the cheat is on, starts from the
+// maximum and makes a spending 0, so the result is the maximum. The method then stores it and raises its events as usual. Turning it on
+// fills the bar at the player's next mana change.
 // Blood Orbs (the game's item loot_orb_red) and the upgrade materials are counts in the player's PersistentData.PlayerWallet, which is
 // saved with the player's data. F7 and F8 add to them with PlayerWallet.AddToWallet, as collecting Blood Orbs or opening a chest does:
 // OffsetWallet adds to the count, OnAddedToWallet tells the HUD (the Blood Orb counter counts up), and the game's next save keeps the new
@@ -72,6 +80,7 @@ struct Cheat {
 };
 Cheat godMode{"God Mode", "God Mode", "SOS_GOD_MODE"};
 Cheat infiniteSpirit{"Infinite Spartan Spirit", "Spartan Spirit", "SOS_INFINITE_SPARTAN_SPIRIT"};
+Cheat infiniteMagic{"Infinite Magic", "Magic", "SOS_INFINITE_MAGIC"};
 Cheat movementSpeed{"Movement Speed 2x", "Movement Speed", "SOS_MOVEMENT_SPEED"};
 Cheat jumpHeight{"Jump Height 2x", "Jump Height", "SOS_JUMP_HEIGHT"};
 
@@ -124,9 +133,9 @@ Award upgradeMaterials{"Upgrade Materials", " +10", kUpgradeMaterials, std::size
 const char* awardsUnavailable = "game code not recognised";
 const char* const kUnavailable = ": unavailable";
 
-// SDL scancodes of the cheat keys; F3 (60) and F4 (61) are kept for Infinite Magic and Damage 2x, F9 and F10 are free, F11 is the
-// runtime's fullscreen.
-constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kMovementSpeedKey = 62, kJumpHeightKey = 63, kBloodOrbsKey = 64, kUpgradeMaterialsKey = 65;
+// SDL scancodes of the cheat keys; F4 (61) is kept for Damage 2x, F9 and F10 are free, F11 is the runtime's fullscreen.
+constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kInfiniteMagicKey = 60, kMovementSpeedKey = 62, kJumpHeightKey = 63,
+              kBloodOrbsKey = 64, kUpgradeMaterialsKey = 65;
 constexpr std::uint64_t kNoticeMs = 2000;
 constexpr std::uint64_t kAwardWaitMs = 1000;  // how long a requested action waits for the player's controller
 
@@ -138,6 +147,8 @@ std::uint8_t* game = nullptr;
 constexpr std::uint32_t kOffsetHp = 0xdab550;       // EntityComponents.Vitals.OffsetHp(float)
 constexpr std::uint32_t kOffsetGreyHp = 0xdabaf0;   // EntityComponents.Vitals.OffsetGreyHp(float)
 constexpr std::uint32_t kOffsetSpirit = 0xda20b0;   // EntityComponents.SpartanSpirit.OffsetSpartanSpirit(float, bool)
+constexpr std::uint32_t kOffsetMana = 0xd959d0;     // EntityComponents.ManaState.OffsetMana(float, bool)
+constexpr std::uint32_t kManaClamp = 0xd95a0f;      // OffsetMana: currentMana + the change kept within 0 and currentMaxMana
 constexpr std::uint32_t kIsPlayer = 0x80ef70;       // Utilities.PawnUtils.IsPlayer(GameObject)
 constexpr std::uint32_t kGetGameObject = 0x629c8f0; // Component.get_gameObject icall pointer, resolved by the game before it is needed
 constexpr std::uint32_t kControllerUpdate = 0x5d35c0;  // PlayerController.Update(), empty
@@ -155,6 +166,7 @@ constexpr std::uint32_t kJumpAngle = 0x6face0;         // MoveStateJump.GetJumpA
 constexpr std::size_t kNativeObject = 0x10;                                       // UnityEngine.Object.m_CachedPtr, null once destroyed
 constexpr std::size_t kMaxHp = 0x38, kCurrentHp = 0x40, kGreyHp = 0x44, kDead = 0x48;  // Vitals
 constexpr std::size_t kCurrentSpirit = 0x20, kMaxSpirit = 0x24;                   // SpartanSpirit
+constexpr std::size_t kCurrentMana = 0x28, kMaxMana = 0x2c;                       // ManaState.currentMana, currentMaxMana
 constexpr std::size_t kWalletCount = 0x20;  // PlayerWallet.walletCount (item -> count), created by the first addition
 constexpr std::size_t kInputDelta = 0xe0;   // CharacterMovement.deltaFromMovementInputsThisFrame (Vector2)
 constexpr std::size_t kJumpContext = 0x58;          // MoveStateAerialBase.context (the PlayerMovement it moves)
@@ -293,6 +305,34 @@ bool APS5_VABI SpiritFilter(void* spirit, void*, void*, float* amount) {
     Field<float>(spirit, kCurrentSpirit) = Field<float>(spirit, kMaxSpirit);
     *amount = 0.0f;
     return false;
+}
+
+// DEBUG_SAULO: temporary Infinite Magic diagnostics, remove before commit: one line for the first player mana change the cheat holds
+// after it is switched on (a spending, or mana below the maximum), not one per regeneration tick.
+std::atomic<bool> DEBUG_SAULO_magicLogged{false};
+// DEBUG_SAULO
+__attribute__((noinline)) void DEBUG_SAULO_ManaChange(float current, float max, float delta) {
+    if (DEBUG_SAULO_magicLogged.exchange(true)) return;
+    std::fprintf(stderr, "[DEBUG_SAULO] Infinite Magic player current=%.2f max=%.2f delta=%.2f result=%.2f\n", static_cast<double>(current),
+        static_cast<double>(max), static_cast<double>(delta), static_cast<double>(max));
+    std::fflush(stderr);
+}
+
+// Called by ManaState.OffsetMana(this, amount, isRegeneration) in place of its own computation of the new mana: currentMana + amount
+// kept within 0 and currentMaxMana, with the game's comparisons. OffsetMana stores the result and raises its events. With Infinite Magic
+// on, the player's mana starts from the maximum and a spending becomes 0, so the result is the maximum; a gain is kept, and is capped
+// at the maximum as usual.
+float APS5_VABI ManaAfterOffset(void* mana, float amount) {
+    float current = Field<float>(mana, kCurrentMana);
+    const float max = Field<float>(mana, kMaxMana);
+    if (infiniteMagic.on.load(std::memory_order_relaxed) && OnPlayer(mana)) {
+        if (!DEBUG_SAULO_magicLogged.load(std::memory_order_relaxed) && (amount < 0.0f || current < max)) DEBUG_SAULO_ManaChange(current, max, amount);  // DEBUG_SAULO
+        current = max;
+        if (amount < 0.0f) amount = 0.0f;
+    }
+    const float value = current + amount;
+    const float limited = max < value ? max : value;  // vminss max, value
+    return value < 0.0f ? 0.0f : limited;             // vcmpltss value, 0; vandnps
 }
 
 // DEBUG_SAULO: temporary Movement Speed diagnostics, remove before commit: one line for the first non-zero player movement the cheat doubles
@@ -582,6 +622,14 @@ constexpr std::uint8_t kInputDeltaCallBytes[] = {0xc5, 0xfb, 0x10, 0x83, 0xe0, 0
 constexpr std::uint8_t kJumpDirectionCallBytes[] = {0xc5, 0xfa, 0x10, 0x83, 0x9c, 0x00, 0x00, 0x00, 0x4c, 0x8b, 0x73, 0x58,
                                                     0x48, 0x89, 0xdf, 0xe8, 0x05, 0xe3, 0xff, 0xff};
 
+// The computation ManaAfterOffset replaces, with this = rbx and the change in xmm0: vaddss xmm0, xmm0, dword ptr [rbx + 0x28]; vmovss
+// xmm1, dword ptr [rbx + 0x2c]; vxorps xmm2, xmm2, xmm2; vminss xmm1, xmm1, xmm0; vcmpltss xmm0, xmm0, xmm2; vandnps xmm0, xmm0, xmm1. It
+// becomes mov rdi, rbx; mov rax, ManaAfterOffset; call rax; and 12 bytes of nop, and the game's next instruction stores xmm0 in
+// currentMana. The stack is 16-byte aligned there, nothing the call may change is read after it before being written (rbx and r14, which
+// the method keeps, survive the call), and the only jump into these bytes lands on the first one.
+constexpr std::uint8_t kManaClampBytes[] = {0xc5, 0xfa, 0x58, 0x43, 0x28, 0xc5, 0xfa, 0x10, 0x4b, 0x2c, 0xc5, 0xe8, 0x57, 0xd2,
+                                            0xc5, 0xf2, 0x5d, 0xc8, 0xc5, 0xfa, 0xc2, 0xc2, 0x01, 0xc5, 0xf8, 0x55, 0xc1};
+
 // Replaces the game's code at site, if it still holds original, with code of the same size.
 template <std::size_t size> bool Rewrite(std::uint32_t site, const std::uint8_t (&original)[size], const std::uint8_t (&code)[size]) {
     std::uint8_t* at = game + site;
@@ -606,6 +654,14 @@ bool RedirectJumpDirection() {
     const auto function = &JumpDirection;
     std::memcpy(call + 9, &function, sizeof(function));
     return Rewrite(kJumpDirectionCall, kJumpDirectionCallBytes, call);
+}
+
+bool RedirectManaClamp() {
+    std::uint8_t call[sizeof(kManaClampBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0,
+                                                  0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00};
+    const auto function = &ManaAfterOffset;
+    std::memcpy(call + 5, &function, sizeof(function));
+    return Rewrite(kManaClamp, kManaClampBytes, call);
 }
 
 // A cheat whose game code is not recognised stays off and unavailable; the others are not affected. redirect, if any, patches a call.
@@ -640,6 +696,7 @@ void OnKey(int scancode) {
     }
     Cheat* cheat = scancode == kGodModeKey ? &godMode
                  : scancode == kInfiniteSpiritKey ? &infiniteSpirit
+                 : scancode == kInfiniteMagicKey  ? &infiniteMagic
                  : scancode == kMovementSpeedKey ? &movementSpeed
                  : scancode == kJumpHeightKey    ? &jumpHeight
                                                  : nullptr;
@@ -652,6 +709,11 @@ void OnKey(int scancode) {
     }
     std::fprintf(stderr, "%s: %s\n", cheat->name, notice != nullptr ? notice : "ON");
     if (cheat == &godMode && cheat->hooked) std::fprintf(stderr, "[DEBUG_SAULO] GodMode F1 toggle %s\n", cheat->on.load() ? "ON" : "OFF");  // DEBUG_SAULO
+    // DEBUG_SAULO
+    if (cheat == &infiniteMagic && cheat->hooked) {
+        DEBUG_SAULO_magicLogged.store(false);
+        DEBUG_SAULO_Log("[DEBUG_SAULO] Infinite Magic F3 toggle %s\n", cheat->on.load() ? "ON" : "OFF");
+    }
     // DEBUG_SAULO
     if (cheat == &movementSpeed && cheat->hooked) {
         DEBUG_SAULO_movementLogged.store(false);
@@ -673,7 +735,7 @@ void TitleStatus(char* text, std::size_t size) {
     ExpireRequest(now);
     std::size_t used = 0;
     if (size != 0) text[0] = '\0';
-    for (const Cheat* cheat : {&godMode, &infiniteSpirit, &movementSpeed, &jumpHeight}) {
+    for (const Cheat* cheat : {&godMode, &infiniteSpirit, &infiniteMagic, &movementSpeed, &jumpHeight}) {
         const char* state = cheat->on.load() ? "ON" : now < cheat->noticeUntil.load() ? cheat->notice.load() : nullptr;
         if (state == nullptr || used >= size) continue;
         const int written = std::snprintf(text + used, size - used, " | %s: %s", cheat->label, state);
@@ -710,6 +772,21 @@ bool StartCheats() {
     // Infinite Spartan Spirit: SpartanSpirit.OffsetSpartanSpirit and Update, PawnUtils.GetMyController and IsPlayer.
     Start(infiniteSpirit, fits && Hash({{0xda20b0, 0xda2520}, {0xda2b10, 0xda2d10}, {0x80ecd0, 0x80f0b0}}) == 0xb0e9d2c9cfd2a0b1,
         {{kOffsetSpirit, 12, SpiritFilter}});
+    // Infinite Magic: ManaState.Awake to Validate (OffsetMana, with the computation it redirects, and what sets currentMaxMana), what
+    // spends and changes mana (EventModule_AffectMana.ApplyModule and AffectMana, TickModule_OffsetManaPerSec.Tick), the mana checks that
+    // read currentMana (BooleanEvaluator_ManaCheck and BooleanEvaluator_HasNoMana), PawnUtils.GetMyController and IsPlayer.
+    const bool magicRecognised = fits && Hash({{0xd954f0, 0xd95bd0}, {0xdf2980, 0xdf2bc0}, {0x823d20, 0x823e30}, {0xc26550, 0xc26750},
+        {0xc1af20, 0xc1afe0}, {0x80ecd0, 0x80f0b0}}) == 0xa63f97d69c46ad8d;
+    DEBUG_SAULO_Log("[DEBUG_SAULO] Infinite Magic hook install offsetMana=0x%llx clamp=0x%llx fields currentMana=+0x%zx maxMana=+0x%zx fingerprint %s\n",  // DEBUG_SAULO
+        DEBUG_SAULO_Address(game + kOffsetMana), DEBUG_SAULO_Address(game + kManaClamp), kCurrentMana, kMaxMana, magicRecognised ? "OK" : "FAILED");  // DEBUG_SAULO
+    Start(infiniteMagic, magicRecognised, {}, RedirectManaClamp);
+    // DEBUG_SAULO
+    if (infiniteMagic.hooked) {
+        void* target = nullptr;
+        std::memcpy(&target, game + kManaClamp + 5, sizeof(target));
+        DEBUG_SAULO_Log("[DEBUG_SAULO] Infinite Magic patch applied clamp=0x%llx now calls 0x%llx\n", DEBUG_SAULO_Address(game + kManaClamp),
+            DEBUG_SAULO_Address(target));
+    }
     // Blood Orbs and upgrade materials: il2cpp_string_new, Controller.GetPawnObject, PlayerController.Update and the padding after it,
     // PlayerRuntimeDataUtils.TryGetWallet, PlayerInventory.GetItemDefinitionByItemId, PlayerWallet.OffsetWallet to TrySubtractFromWallet,
     // PlayerHUDMenu.OnWalletItemAdded and TryQueueItemNotification (what the Nullable<bool> means), and

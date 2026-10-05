@@ -53,14 +53,15 @@ const wchar_t* kLauncherIni = L"\\launcher.ini";
 struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int row; };
 const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0},
                          {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 1},
+                         {L"infinite_magic", L"Infinite Magic (F3)", L"SOS_INFINITE_MAGIC", 107, 2},
                          {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 4},
                          {L"jump_height", L"Jump Height 2x (F6)", L"SOS_JUMP_HEIGHT", 106, 5}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
 // Cheats that keep their key and their place but do not exist yet, in the rows from kCheatPlaceholdersRow: shown disabled and never
 // checked, nothing about them is stored.
-const wchar_t* const kCheatPlaceholders[] = {L"Infinite Magic (F3)", L"Damage 2x (F4)"};
+const wchar_t* const kCheatPlaceholders[] = {L"Damage 2x (F4)"};
 constexpr size_t kCheatPlaceholderCount = sizeof(kCheatPlaceholders) / sizeof(kCheatPlaceholders[0]);
-constexpr int kCheatPlaceholdersRow = 2;
+constexpr int kCheatPlaceholdersRow = 3;
 // Keys that add something once while playing, in the rows from kCheatKeysRow; they are listed for information, nothing about them is stored.
 const wchar_t* const kCheatKeys[] = {L"F7  Add 1000 Blood Orbs", L"F8  Add 10 Upgrade Materials"};
 constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
