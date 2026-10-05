@@ -16,10 +16,10 @@
 
 namespace {
 
-// Sons of Sparta cheats, for the player only and used while playing: F1 God Mode, F2 Infinite Spartan Spirit and F6 Movement Speed 2x are
-// switched on and off, F4 adds 1000 Blood Orbs and F5 adds 10 of each upgrade material (F3 is kept for a future Infinite Magic). The
-// launcher passes the starting states of the three switches as SOS_GOD_MODE=1, SOS_INFINITE_SPARTAN_SPIRIT=1 and SOS_MOVEMENT_SPEED=1.
-// When this library loads, before any game code runs, each of them whose game code is recognised gets its hooks in Il2cppUserAssemblies;
+// Sons of Sparta cheats, for the player only and used while playing: F1 God Mode, F2 Infinite Spartan Spirit, F5 Movement Speed 2x and
+// F6 Jump Height 2x are switched on and off, F7 adds 1000 Blood Orbs and F8 adds 10 of each upgrade material (F3 and F4 are kept for a
+// future Infinite Magic and Damage 2x). The launcher passes the starting states of the four switches as SOS_GOD_MODE=1,
+// SOS_INFINITE_SPARTAN_SPIRIT=1, SOS_MOVEMENT_SPEED=1 and SOS_JUMP_HEIGHT=1. When this library loads, before any game code runs, each of them whose game code is recognised gets its hooks in Il2cppUserAssemblies;
 // the hooks stay for the whole session, the keys only switch the states or ask for an addition, and the window title lists the cheats
 // that are on. No two of them share a hook. Offsets are module RVAs.
 //
@@ -35,13 +35,13 @@ namespace {
 // Infinite Spartan Spirit: every change of the meter (spending, block costs, regeneration every frame) goes through
 // EntityComponents.SpartanSpirit.OffsetSpartanSpirit; for the player the meter is set to its maximum and the change to 0.
 // Blood Orbs (the game's item loot_orb_red) and the upgrade materials are counts in the player's PersistentData.PlayerWallet, which is
-// saved with the player's data. F4 and F5 add to them with PlayerWallet.AddToWallet, as collecting Blood Orbs or opening a chest does:
+// saved with the player's data. F7 and F8 add to them with PlayerWallet.AddToWallet, as collecting Blood Orbs or opening a chest does:
 // OffsetWallet adds to the count, OnAddedToWallet tells the HUD (the Blood Orb counter counts up), and the game's next save keeps the new
-// counts. Its last argument, a Nullable<bool>, only decides whether PlayerHUDMenu announces the item (item ticker, Major Get or card): F4
-// leaves it unset, so Blood Orbs show as when collected, and F5 sets it to true, so its nine additions queue no HUD notification. Game
+// counts. Its last argument, a Nullable<bool>, only decides whether PlayerHUDMenu announces the item (item ticker, Major Get or card): F7
+// leaves it unset, so Blood Orbs show as when collected, and F8 sets it to true, so its nine additions queue no HUD notification. Game
 // objects must not be touched on the window thread, so a key only asks for its action; the next PlayerController.Update (empty, called by
 // the game every frame for the player's controller) finds the wallet of the player that controller plays and the items the way a save
-// loads them, and adds. F4 and F5 do nothing while either action waits or runs, and an action no player picks up within a second fails.
+// loads them, and adds. F7 and F8 do nothing while either action waits or runs, and an action no player picks up within a second fails.
 // Movement Speed 2x: walking, running and steering in the air move a character by a delta its movement state sets every physics step from
 // the movement input (CharacterMovement.UseAsMovementDelta: direction * fixedDeltaTime * movementSpeed * the state's factor), which
 // PlayerMovement.MovementTick may then scale (in the air, under root motion). PlayerMovement.TickPseudoPhysics, which only the player's
@@ -50,6 +50,15 @@ namespace {
 // That call is redirected to MovementInputDelta, which makes it and doubles its result for the player while the cheat is on. Nothing is
 // stored, so every step moves exactly twice the game's own amount, and switching it off gives the game's amount from the next step; the
 // physics velocity, root motion, other characters and the game's time are not touched.
+// Jump Height 2x: a jump the player's jump state (MoveStateJump) starts runs its DelayStartJumping coroutine, which zeroes the player's
+// velocity (ZeroOutVelocity) and applies one force, the jump magnitude (with its stat modifier) times the direction
+// GetJumpAngleAsForwardDirectionVector gives, through context.ApplyForce. CharacterMovement.CalcVelocity adds that force to the velocity
+// once, as an impulse (force * receivedPhysicsImpulseMultiplier / mass), and while the character rises pulls it down with constant gravity
+// and nothing caps the upward speed, so the jump's height grows with the square of its upward speed. The coroutine's one call to
+// GetJumpAngleAsForwardDirectionVector is redirected to JumpDirection, which makes it and, for the player while the cheat is on,
+// multiplies the direction's upward part by sqrt(2): sqrt(2) times the upward speed, twice the height. The sideways part, gravity, falling,
+// knockback, root motion, scripted launches (which do not go through this call) and other characters are not touched, and nothing is
+// stored, so every jump starts from the game's own value.
 
 struct Cheat {
     const char* name;      // in the log
@@ -64,6 +73,7 @@ struct Cheat {
 Cheat godMode{"God Mode", "God Mode", "SOS_GOD_MODE"};
 Cheat infiniteSpirit{"Infinite Spartan Spirit", "Spartan Spirit", "SOS_INFINITE_SPARTAN_SPIRIT"};
 Cheat movementSpeed{"Movement Speed 2x", "Movement Speed", "SOS_MOVEMENT_SPEED"};
+Cheat jumpHeight{"Jump Height 2x", "Jump Height", "SOS_JUMP_HEIGHT"};
 
 // A wallet item an action adds.
 struct WalletItem {
@@ -87,7 +97,7 @@ constexpr WalletItem kUpgradeMaterials[] = {
 constexpr std::size_t kMostItems = std::size(kUpgradeMaterials);
 static_assert(std::size(kBloodOrb) <= kMostItems);
 
-// The one wallet action that may be outstanding, shared by F4 and F5: a key press is taken only while it is idle, so the two actions
+// The one wallet action that may be outstanding, shared by F7 and F8: a key press is taken only while it is idle, so the two actions
 // never wait or run at the same time. Only the window thread (keys) moves it from idle to queued; the game thread moves a queued action
 // to running and, when that run ends, back to idle; the window thread gives up a queued action no game thread took in time. A running
 // action belongs to the game thread until it ends.
@@ -95,7 +105,7 @@ enum : int { kIdle, kBloodOrbsQueued, kBloodOrbsRunning, kUpgradeMaterialsQueued
 std::atomic<int> walletAction{kIdle};
 std::atomic<std::uint64_t> walletRequestedAt{0};  // when the queued action was asked for
 
-// What F4 or F5 asks for: the window thread queues it, the game thread does it, and the result shows in the title for a while.
+// What F7 or F8 asks for: the window thread queues it, the game thread does it, and the result shows in the title for a while.
 struct Award {
     const char* name;   // in the log and the window title
     const char* added;  // in the window title after the name
@@ -110,12 +120,13 @@ struct Award {
 Award bloodOrbs{"Blood Orbs", " +1000", kBloodOrb, std::size(kBloodOrb), 1000, true, kBloodOrbsQueued, kBloodOrbsRunning};
 Award upgradeMaterials{"Upgrade Materials", " +10", kUpgradeMaterials, std::size(kUpgradeMaterials), 10, false, kUpgradeMaterialsQueued,
                        kUpgradeMaterialsRunning};
-// Why F4 and F5 do nothing in this session; null once their hook is in place.
+// Why F7 and F8 do nothing in this session; null once their hook is in place.
 const char* awardsUnavailable = "game code not recognised";
 const char* const kUnavailable = ": unavailable";
 
-// SDL scancodes of the cheat keys; F3 (60) is kept for Infinite Magic and F7 to F10 for later cheats, F11 is the runtime's fullscreen.
-constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kBloodOrbsKey = 61, kUpgradeMaterialsKey = 62, kMovementSpeedKey = 63;
+// SDL scancodes of the cheat keys; F3 (60) and F4 (61) are kept for Infinite Magic and Damage 2x, F9 and F10 are free, F11 is the
+// runtime's fullscreen.
+constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kMovementSpeedKey = 62, kJumpHeightKey = 63, kBloodOrbsKey = 64, kUpgradeMaterialsKey = 65;
 constexpr std::uint64_t kNoticeMs = 2000;
 constexpr std::uint64_t kAwardWaitMs = 1000;  // how long a requested action waits for the player's controller
 
@@ -138,12 +149,17 @@ constexpr std::uint32_t kGetAmount = 0x8ce2b0;         // PersistentData.PlayerW
 constexpr std::uint32_t kAddToWallet = 0x8ce430;       // PersistentData.PlayerWallet.AddToWallet(ItemDefinition, long, bool?)
 constexpr std::uint32_t kInputDeltaCall = 0x7067a9;    // PlayerMovement.TickPseudoPhysics: the slope-aligned movement input delta
 constexpr std::uint32_t kSlopeAligned = 0x6ecf20;      // CharacterMovement.GetSlopeAlignedVersionOfMovementDelta(Vector2)
+constexpr std::uint32_t kJumpDirectionCall = 0x6fc9c7; // <DelayStartJumping>d__27.MoveNext: the direction of the jump's force
+constexpr std::uint32_t kJumpAngle = 0x6face0;         // MoveStateJump.GetJumpAngleAsForwardDirectionVector(float)
 
 constexpr std::size_t kNativeObject = 0x10;                                       // UnityEngine.Object.m_CachedPtr, null once destroyed
 constexpr std::size_t kMaxHp = 0x38, kCurrentHp = 0x40, kGreyHp = 0x44, kDead = 0x48;  // Vitals
 constexpr std::size_t kCurrentSpirit = 0x20, kMaxSpirit = 0x24;                   // SpartanSpirit
 constexpr std::size_t kWalletCount = 0x20;  // PlayerWallet.walletCount (item -> count), created by the first addition
 constexpr std::size_t kInputDelta = 0xe0;   // CharacterMovement.deltaFromMovementInputsThisFrame (Vector2)
+constexpr std::size_t kJumpContext = 0x58;          // MoveStateAerialBase.context (the PlayerMovement it moves)
+constexpr std::size_t kForwardAdjustment = 0x9c;    // MoveStateJump.forwardAdjustmentFactor
+constexpr float kJumpSpeedFactor = 1.41421356f;     // sqrt(2): twice the height of a jump whose height grows with its speed squared
 
 using GetGameObject = void*(APS5_VABI*)(void* component);
 using IsPlayer = bool(APS5_VABI*)(void* gameObject, const void* method);
@@ -164,6 +180,7 @@ struct Vector2 {
     float x, y;
 };
 using SlopeAligned = Vector2(APS5_VABI*)(void* movement, Vector2 moveDelta, const void* method);
+using JumpAngle = Vector2(APS5_VABI*)(void* jumpState, float forwardAdjustmentFactor, const void* method);
 
 template <typename T> T& Field(void* object, std::size_t offset) { return *reinterpret_cast<T*>(static_cast<std::uint8_t*>(object) + offset); }
 template <typename Function> Function Game(std::uint32_t offset) { return reinterpret_cast<Function>(game + offset); }
@@ -299,6 +316,30 @@ Vector2 APS5_VABI MovementInputDelta(void* movement) {
     return {delta.x * 2.0f, delta.y * 2.0f};
 }
 
+// DEBUG_SAULO: temporary Jump Height diagnostics, remove before commit: one line for the first player jump the cheat raises after it is
+// switched on.
+std::atomic<bool> DEBUG_SAULO_jumpLogged{false};
+// DEBUG_SAULO
+__attribute__((noinline)) void DEBUG_SAULO_JumpDirection(Vector2 original, Vector2 modified) {
+    if (DEBUG_SAULO_jumpLogged.exchange(true)) return;
+    std::fprintf(stderr, "[DEBUG_SAULO] Jump Height player direction original=(%.6f, %.6f) modified=(%.6f, %.6f) upward factor=%.6f\n",
+        static_cast<double>(original.x), static_cast<double>(original.y), static_cast<double>(modified.x), static_cast<double>(modified.y),
+        static_cast<double>(kJumpSpeedFactor));
+    std::fflush(stderr);
+}
+
+// Called once at the start of each jump the jump state starts, by MoveStateJump's DelayStartJumping coroutine (this = the MoveStateJump), in
+// place of GetJumpAngleAsForwardDirectionVector(this, forwardAdjustmentFactor): the same direction, its upward part raised for the player
+// with Jump Height 2x on. The coroutine multiplies it by the jump magnitude and applies it to context as the jump's impulse.
+Vector2 APS5_VABI JumpDirection(void* jumpState) {
+    Vector2 direction = Game<JumpAngle>(kJumpAngle)(jumpState, Field<float>(jumpState, kForwardAdjustment), nullptr);
+    if (!jumpHeight.on.load(std::memory_order_relaxed) || direction.y <= 0.0f || !OnPlayer(Field<void*>(jumpState, kJumpContext))) return direction;
+    const Vector2 DEBUG_SAULO_original = direction;  // DEBUG_SAULO
+    direction.y *= kJumpSpeedFactor;
+    if (!DEBUG_SAULO_jumpLogged.load(std::memory_order_relaxed)) DEBUG_SAULO_JumpDirection(DEBUG_SAULO_original, direction);  // DEBUG_SAULO
+    return direction;
+}
+
 // Logs the result of one action and shows it in the window title for two seconds; another result restarts that time. item names the
 // wallet item a failure is about.
 void Notify(Award& award, const char* failure, const char* item) {
@@ -315,7 +356,7 @@ void Notify(Award& award, const char* failure, const char* item) {
 
 // DEBUG_SAULO: temporary wallet action diagnostics, remove before commit. Only key presses and the steps of an action are logged, each
 // line in one write and flushed at once, so after a hard stall game.err ends with the last step that was reached.
-const char* DEBUG_SAULO_Key(const Award& award) { return &award == &bloodOrbs ? "F4" : "F5"; }  // DEBUG_SAULO
+const char* DEBUG_SAULO_Key(const Award& award) { return &award == &bloodOrbs ? "F7" : "F8"; }  // DEBUG_SAULO
 const char* DEBUG_SAULO_Action(const Award& award) { return &award == &bloodOrbs ? "blood_orbs" : "upgrade_materials"; }  // DEBUG_SAULO
 // DEBUG_SAULO
 const char* DEBUG_SAULO_State(int state) {
@@ -444,7 +485,7 @@ void ExpireRequest(std::uint64_t now) {
     DEBUG_SAULO_Log("[DEBUG_SAULO] Wallet action expired action=%s\n", DEBUG_SAULO_Action(award));  // DEBUG_SAULO
 }
 
-// F4 or F5 on the window thread: asks for its action, unless a wallet action (either one) is queued or running. A queued action that
+// F7 or F8 on the window thread: asks for its action, unless a wallet action (either one) is queued or running. A queued action that
 // waited too long is given up first, here as in the title, which is only updated while frames are presented.
 void Request(Award& award) {
     if (awardsUnavailable != nullptr) {
@@ -534,18 +575,37 @@ bool Hook(const Patch& patch) {
 // and rax is written before it is read again), and the only jump into these bytes lands on the first one.
 constexpr std::uint8_t kInputDeltaCallBytes[] = {0xc5, 0xfb, 0x10, 0x83, 0xe0, 0x00, 0x00, 0x00, 0x48, 0x89, 0xdf, 0xe8, 0x67, 0x67, 0xfe, 0xff};
 
+// The call JumpDirection replaces: vmovss xmm0, dword ptr [rbx + 0x9c]; mov r14, qword ptr [rbx + 0x58]; mov rdi, rbx; call
+// GetJumpAngleAsForwardDirectionVector. It becomes mov r14, qword ptr [rbx + 0x58]; mov rdi, rbx; mov rax, JumpDirection; call rax; nop, at
+// the same stack depth (JumpDirection reads forwardAdjustmentFactor itself). rax is free there for the same reason, and no jump lands
+// inside these bytes.
+constexpr std::uint8_t kJumpDirectionCallBytes[] = {0xc5, 0xfa, 0x10, 0x83, 0x9c, 0x00, 0x00, 0x00, 0x4c, 0x8b, 0x73, 0x58,
+                                                    0x48, 0x89, 0xdf, 0xe8, 0x05, 0xe3, 0xff, 0xff};
+
+// Replaces the game's code at site, if it still holds original, with code of the same size.
+template <std::size_t size> bool Rewrite(std::uint32_t site, const std::uint8_t (&original)[size], const std::uint8_t (&code)[size]) {
+    std::uint8_t* at = game + site;
+    if (std::memcmp(at, original, size) != 0) return false;
+    DWORD protection = 0;
+    if (!VirtualProtect(at, size, PAGE_EXECUTE_READWRITE, &protection)) return false;
+    std::memcpy(at, code, size);
+    VirtualProtect(at, size, protection, &protection);
+    FlushInstructionCache(GetCurrentProcess(), at, size);
+    return true;
+}
+
 bool RedirectInputDelta() {
-    std::uint8_t* site = game + kInputDeltaCall;
-    if (std::memcmp(site, kInputDeltaCallBytes, sizeof(kInputDeltaCallBytes)) != 0) return false;
     std::uint8_t call[sizeof(kInputDeltaCallBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0x90};
     const auto function = &MovementInputDelta;
     std::memcpy(call + 5, &function, sizeof(function));
-    DWORD protection = 0;
-    if (!VirtualProtect(site, sizeof(call), PAGE_EXECUTE_READWRITE, &protection)) return false;
-    std::memcpy(site, call, sizeof(call));
-    VirtualProtect(site, sizeof(call), protection, &protection);
-    FlushInstructionCache(GetCurrentProcess(), site, sizeof(call));
-    return true;
+    return Rewrite(kInputDeltaCall, kInputDeltaCallBytes, call);
+}
+
+bool RedirectJumpDirection() {
+    std::uint8_t call[sizeof(kJumpDirectionCallBytes)] = {0x4c, 0x8b, 0x73, 0x58, 0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0x90};
+    const auto function = &JumpDirection;
+    std::memcpy(call + 9, &function, sizeof(function));
+    return Rewrite(kJumpDirectionCall, kJumpDirectionCallBytes, call);
 }
 
 // A cheat whose game code is not recognised stays off and unavailable; the others are not affected. redirect, if any, patches a call.
@@ -581,6 +641,7 @@ void OnKey(int scancode) {
     Cheat* cheat = scancode == kGodModeKey ? &godMode
                  : scancode == kInfiniteSpiritKey ? &infiniteSpirit
                  : scancode == kMovementSpeedKey ? &movementSpeed
+                 : scancode == kJumpHeightKey    ? &jumpHeight
                                                  : nullptr;
     if (cheat == nullptr) return;
     const char* notice = "unavailable";
@@ -594,20 +655,25 @@ void OnKey(int scancode) {
     // DEBUG_SAULO
     if (cheat == &movementSpeed && cheat->hooked) {
         DEBUG_SAULO_movementLogged.store(false);
-        DEBUG_SAULO_Log("[DEBUG_SAULO] Movement Speed F6 toggle %s\n", cheat->on.load() ? "ON" : "OFF");
+        DEBUG_SAULO_Log("[DEBUG_SAULO] Movement Speed F5 toggle %s\n", cheat->on.load() ? "ON" : "OFF");
+    }
+    // DEBUG_SAULO
+    if (cheat == &jumpHeight && cheat->hooked) {
+        DEBUG_SAULO_jumpLogged.store(false);
+        DEBUG_SAULO_Log("[DEBUG_SAULO] Jump Height F6 toggle %s\n", cheat->on.load() ? "ON" : "OFF");
     }
     cheat->notice.store(notice);
     cheat->noticeUntil.store(notice != nullptr ? NowMs() + kNoticeMs : 0);
 }
 
 // Appended to the window title after the FPS counter (on the same window thread as the keys): every cheat that is on, for two seconds
-// one that a key turned off, and for two seconds the result of F4 and F5. Requests that waited too long fail here.
+// one that a key turned off, and for two seconds the result of F7 and F8. Requests that waited too long fail here.
 void TitleStatus(char* text, std::size_t size) {
     const std::uint64_t now = NowMs();
     ExpireRequest(now);
     std::size_t used = 0;
     if (size != 0) text[0] = '\0';
-    for (const Cheat* cheat : {&godMode, &infiniteSpirit, &movementSpeed}) {
+    for (const Cheat* cheat : {&godMode, &infiniteSpirit, &movementSpeed, &jumpHeight}) {
         const char* state = cheat->on.load() ? "ON" : now < cheat->noticeUntil.load() ? cheat->notice.load() : nullptr;
         if (state == nullptr || used >= size) continue;
         const int written = std::snprintf(text + used, size - used, " | %s: %s", cheat->label, state);
@@ -673,6 +739,21 @@ bool StartCheats() {
         void* target = nullptr;
         std::memcpy(&target, game + kInputDeltaCall + 5, sizeof(target));
         DEBUG_SAULO_Log("[DEBUG_SAULO] Movement Speed patch applied call=0x%llx now calls 0x%llx\n", DEBUG_SAULO_Address(game + kInputDeltaCall),
+            DEBUG_SAULO_Address(target));
+    }
+    // Jump Height 2x: <DelayStartJumping>d__27.MoveNext (with the call it redirects), MoveStateJump.GetJumpAngleAsForwardDirectionVector,
+    // CharacterMovement.CalcVelocity and ApplyForce (the force is one impulse, gravity is constant while rising, the upward speed is not
+    // capped), PlayerMovement.MovementTick that clears the force after each step, PawnUtils.GetMyController and IsPlayer.
+    const bool jumpRecognised = fits && Hash({{0x6fc450, 0x6fcbf0}, {0x6face0, 0x6fb1b0}, {0x6efe80, 0x6f0180}, {0x6f0810, 0x6f08e0},
+        {0x708d70, 0x709360}, {0x80ecd0, 0x80f0b0}}) == 0x6b8174068fca8cd1;
+    DEBUG_SAULO_Log("[DEBUG_SAULO] Jump Height hook install call=0x%llx jumpAngle=0x%llx context=+0x%zx fingerprint %s\n",  // DEBUG_SAULO
+        DEBUG_SAULO_Address(game + kJumpDirectionCall), DEBUG_SAULO_Address(game + kJumpAngle), kJumpContext, jumpRecognised ? "OK" : "FAILED");  // DEBUG_SAULO
+    Start(jumpHeight, jumpRecognised, {}, RedirectJumpDirection);
+    // DEBUG_SAULO
+    if (jumpHeight.hooked) {
+        void* target = nullptr;
+        std::memcpy(&target, game + kJumpDirectionCall + 9, sizeof(target));
+        DEBUG_SAULO_Log("[DEBUG_SAULO] Jump Height patch applied call=0x%llx now calls 0x%llx\n", DEBUG_SAULO_Address(game + kJumpDirectionCall),
             DEBUG_SAULO_Address(target));
     }
     HostExtensionRegister_nid_no_patch(OnKey, TitleStatus);

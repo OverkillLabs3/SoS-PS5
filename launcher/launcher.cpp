@@ -49,16 +49,22 @@ const Resolution kResolutions[] = {{0, L"3840 x 2160 (4K)"}, {6, L"2560 x 1440 (
 const wchar_t* kLauncherIni = L"\\launcher.ini";
 
 // [Cheats] in launcher.ini holds the state each cheat starts with; the runtime gets it from the variable and its key switches it while playing.
-// Each has a row in the Cheats group, which lists the cheats and the cheat keys in key order.
+// Each has a row in the Cheats group, which lists the cheats in key order and then the cheat keys.
 struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int row; };
 const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0},
                          {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 1},
-                         {L"movement_speed", L"Movement Speed 2x (F6)", L"SOS_MOVEMENT_SPEED", 105, 4}};
+                         {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 4},
+                         {L"jump_height", L"Jump Height 2x (F6)", L"SOS_JUMP_HEIGHT", 106, 5}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
+// Cheats that keep their key and their place but do not exist yet, in the rows from kCheatPlaceholdersRow: shown disabled and never
+// checked, nothing about them is stored.
+const wchar_t* const kCheatPlaceholders[] = {L"Infinite Magic (F3)", L"Damage 2x (F4)"};
+constexpr size_t kCheatPlaceholderCount = sizeof(kCheatPlaceholders) / sizeof(kCheatPlaceholders[0]);
+constexpr int kCheatPlaceholdersRow = 2;
 // Keys that add something once while playing, in the rows from kCheatKeysRow; they are listed for information, nothing about them is stored.
-const wchar_t* const kCheatKeys[] = {L"F4  Add 1000 Blood Orbs", L"F5  Add 10 Upgrade Materials"};
+const wchar_t* const kCheatKeys[] = {L"F7  Add 1000 Blood Orbs", L"F8  Add 10 Upgrade Materials"};
 constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
-constexpr int kCheatKeysRow = 2;
+constexpr int kCheatKeysRow = 6;
 
 // Only the value 1 turns a cheat on; a missing file, section or key, or any other value, leaves it off.
 bool ReadCheat(const std::wstring& directory, const Cheat& cheat) {
@@ -686,7 +692,7 @@ struct Launcher {
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors.
     // The Cheats group gets one 32-pixel row per cheat and per cheat key; Play and Exit follow it.
-    static constexpr int kCheatRows = static_cast<int>(kCheatCount + kCheatKeyCount);
+    static constexpr int kCheatRows = static_cast<int>(kCheatCount + kCheatPlaceholderCount + kCheatKeyCount);
     static constexpr int kCheatsTop = 272, kCheatsHeight = 70 + 32 * (kCheatRows - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 440, kHeight = kButtonsTop + 48;
     struct Placed { HWND control; RECT bounds; HFONT* face; };
@@ -847,6 +853,9 @@ struct Launcher {
         for (size_t i = 0; i < kCheatCount; ++i) {
             cheatBoxes[i] = control(L"BUTTON", kCheats[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 44, kCheatsTop + 30 + 32 * kCheats[i].row, 352, 28, kCheats[i].id, font);
             SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        for (size_t i = 0; i < kCheatPlaceholderCount; ++i) {
+            control(L"BUTTON", kCheatPlaceholders[i], BS_CHECKBOX | WS_DISABLED, 44, kCheatsTop + 30 + 32 * (kCheatPlaceholdersRow + static_cast<int>(i)), 352, 28, 0, font);
         }
         for (size_t i = 0; i < kCheatKeyCount; ++i) {
             control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, 44, kCheatsTop + 30 + 32 * (kCheatKeysRow + static_cast<int>(i)), 352, 28, 0, font);
