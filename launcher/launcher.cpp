@@ -48,8 +48,7 @@ const Resolution kResolutions[] = {{0, L"3840 x 2160 (4K)"}, {6, L"2560 x 1440 (
 // Host settings that do not belong in the game's save, read with the Windows profile API from launcher.ini.
 const wchar_t* kLauncherIni = L"\\launcher.ini";
 
-// [Cheats] in launcher.ini holds the state each cheat starts with; the runtime gets it from the variable and its key switches it while playing.
-// Each has a row in the Cheats group, which lists the cheats in key order and then the cheat keys.
+// [Cheats] holds the state each cheat starts with; row is its place in the Cheats group.
 struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int row; };
 const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0},
                          {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 1},
@@ -57,21 +56,36 @@ const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0
                          {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 4},
                          {L"jump_height", L"Jump Height 2x (F6)", L"SOS_JUMP_HEIGHT", 106, 5}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
-// Cheats that keep their key and their place but do not exist yet, in the rows from kCheatPlaceholdersRow: shown disabled and never
-// checked, nothing about them is stored.
-const wchar_t* const kCheatPlaceholders[] = {L"Damage 2x (F4)"};
-constexpr size_t kCheatPlaceholderCount = sizeof(kCheatPlaceholders) / sizeof(kCheatPlaceholders[0]);
-constexpr int kCheatPlaceholdersRow = 3;
-// Keys that add something once while playing, in the rows from kCheatKeysRow; they are listed for information, nothing about them is stored.
+// damage_multiplier and SOS_DAMAGE_MULTIPLIER exist only for 2x, 4x and 6x; Off is stored as no key.
+const struct { const wchar_t* label; int factor; } kDamageMultipliers[] = {{L"Off", 1}, {L"2x", 2}, {L"4x", 4}, {L"6x", 6}};
+constexpr int kDamageMultiplierRow = 3, kDamageMultiplierId = 108;
+// Listed for information only; nothing about them is stored.
 const wchar_t* const kCheatKeys[] = {L"F7  Add 1000 Blood Orbs", L"F8  Add 10 Upgrade Materials"};
 constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
 constexpr int kCheatKeysRow = 6;
 
-// Only the value 1 turns a cheat on; a missing file, section or key, or any other value, leaves it off.
+// Only the value 1 turns a cheat on.
 bool ReadCheat(const std::wstring& directory, const Cheat& cheat) {
     wchar_t value[8] = {};
     GetPrivateProfileStringW(L"Cheats", cheat.key, L"0", value, 8, (directory + kLauncherIni).c_str());
     return wcscmp(value, L"1") == 0;
+}
+
+// Only 2, 4 and 6 select a multiplier; anything else is 1, normal damage.
+int ReadDamageMultiplier(const std::wstring& directory) {
+    wchar_t value[8] = {};
+    GetPrivateProfileStringW(L"Cheats", L"damage_multiplier", L"1", value, 8, (directory + kLauncherIni).c_str());
+    for (const auto& option : kDamageMultipliers) {
+        if (std::to_wstring(option.factor) == value) return option.factor;
+    }
+    return 1;
+}
+
+// The default is a value no one stores, so it comes back only when there is no damage_multiplier key.
+bool HasDamageMultiplier(const std::wstring& directory) {
+    wchar_t value[2] = {};
+    GetPrivateProfileStringW(L"Cheats", L"damage_multiplier", L"\x01", value, 2, (directory + kLauncherIni).c_str());
+    return value[0] != L'\x01';
 }
 
 bool ReadBorderless(const std::wstring& directory) {
@@ -693,7 +707,7 @@ struct Launcher {
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors.
     // The Cheats group gets one 32-pixel row per cheat and per cheat key; Play and Exit follow it.
-    static constexpr int kCheatRows = static_cast<int>(kCheatCount + kCheatPlaceholderCount + kCheatKeyCount);
+    static constexpr int kCheatRows = kCheatKeysRow + static_cast<int>(kCheatKeyCount);
     static constexpr int kCheatsTop = 272, kCheatsHeight = 70 + 32 * (kCheatRows - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 440, kHeight = kButtonsTop + 48;
     struct Placed { HWND control; RECT bounds; HFONT* face; };
@@ -707,6 +721,8 @@ struct Launcher {
     bool play = false;
     HWND cheatBoxes[kCheatCount] = {};
     bool cheats[kCheatCount] = {};
+    HWND damageBox = nullptr;
+    int damageMultiplier = 1;
     template <typename Function> static Function User32(const char* name) {
         return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
     }
@@ -789,6 +805,10 @@ struct Launcher {
             self->borderless = SendMessageW(self->mode, CB_GETCURSEL, 0, 0) == 1;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
             for (size_t i = 0; i < kCheatCount; ++i) self->cheats[i] = SendMessageW(self->cheatBoxes[i], BM_GETCHECK, 0, 0) == BST_CHECKED;
+            const LRESULT damageIndex = SendMessageW(self->damageBox, CB_GETCURSEL, 0, 0);
+            if (damageIndex != CB_ERR) {
+                self->damageMultiplier = static_cast<int>(SendMessageW(self->damageBox, CB_GETITEMDATA, static_cast<WPARAM>(damageIndex), 0));
+            }
             DestroyWindow(hwnd);
             return 0;
         }
@@ -802,6 +822,7 @@ struct Launcher {
     // Shows the settings and saves them when Play is pressed; false means the player closed the launcher instead.
     bool Run(const std::wstring& directory, HICON icon) {
         for (size_t i = 0; i < kCheatCount; ++i) cheats[i] = ReadCheat(directory, kCheats[i]);
+        damageMultiplier = ReadDamageMultiplier(directory);
         borderless = ReadBorderless(directory);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
@@ -854,9 +875,16 @@ struct Launcher {
         for (size_t i = 0; i < kCheatCount; ++i) {
             cheatBoxes[i] = control(L"BUTTON", kCheats[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 44, kCheatsTop + 30 + 32 * kCheats[i].row, 352, 28, kCheats[i].id, font);
             SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+            if (kCheats[i].row + 1 == kDamageMultiplierRow) {  // created here so the tab order follows the rows
+                const int y = kCheatsTop + 30 + 32 * kDamageMultiplierRow;
+                control(L"STATIC", L"Damage Multiplier (F4)", SS_CENTERIMAGE, 44, y, 248, 28, 0, font);
+                damageBox = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 296, y, 100, 200, kDamageMultiplierId, font);
+            }
         }
-        for (size_t i = 0; i < kCheatPlaceholderCount; ++i) {
-            control(L"BUTTON", kCheatPlaceholders[i], BS_CHECKBOX | WS_DISABLED, 44, kCheatsTop + 30 + 32 * (kCheatPlaceholdersRow + static_cast<int>(i)), 352, 28, 0, font);
+        for (const auto& option : kDamageMultipliers) {
+            const WPARAM item = static_cast<WPARAM>(SendMessageW(damageBox, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option.label)));
+            SendMessageW(damageBox, CB_SETITEMDATA, item, static_cast<LPARAM>(option.factor));
+            if (option.factor == damageMultiplier) SendMessageW(damageBox, CB_SETCURSEL, item, 0);
         }
         for (size_t i = 0; i < kCheatKeyCount; ++i) {
             control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, 44, kCheatsTop + 30 + 32 * (kCheatKeysRow + static_cast<int>(i)), 352, 28, 0, font);
@@ -901,6 +929,11 @@ struct Launcher {
                 const std::wstring text = L"The " + std::wstring(kCheats[i].label) + L" setting could not be saved. It is used for this start only.";
                 MessageBoxW(nullptr, text.c_str(), kTitle, MB_OK | MB_ICONWARNING);
             }
+        }
+        if (play && (damageMultiplier == 1 ? HasDamageMultiplier(directory) : damageMultiplier != ReadDamageMultiplier(directory)) &&
+            !WritePrivateProfileStringW(L"Cheats", L"damage_multiplier", damageMultiplier == 1 ? nullptr : std::to_wstring(damageMultiplier).c_str(),
+                                        (directory + kLauncherIni).c_str())) {
+            MessageBoxW(nullptr, L"The Damage Multiplier (F4) setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
         if (play && chosen >= 0) {
             if (!WriteIntSetting(directory, kResolutionKey, chosen)) {
@@ -989,11 +1022,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     bool cheats[kCheatCount] = {};
+    int damageMultiplier = 1;
     bool borderless = false;
     {
         Launcher launcher;
         if (!launcher.Run(directory, gameIcon)) return 0;
         std::copy(std::begin(launcher.cheats), std::end(launcher.cheats), cheats);
+        damageMultiplier = launcher.damageMultiplier;
         borderless = launcher.borderless;
     }
 
@@ -1071,8 +1106,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
     PROCESS_INFORMATION process{};
-    // The runtime reads the starting cheat states from its environment; a cheat that is off is removed, so an inherited value cannot turn it on.
+    // A cheat that is off has no variable, so an inherited value cannot turn it on.
     for (size_t i = 0; i < kCheatCount; ++i) SetEnvironmentVariableW(kCheats[i].variable, cheats[i] ? L"1" : nullptr);
+    SetEnvironmentVariableW(L"SOS_DAMAGE_MULTIPLIER", damageMultiplier != 1 ? std::to_wstring(damageMultiplier).c_str() : nullptr);
     std::wstring command = L"\"" + runtime + L"\"";
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process)) {
         Fail(L"The game could not be started.");
