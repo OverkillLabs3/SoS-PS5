@@ -129,7 +129,7 @@ void DisplayWindow::UpdateTitle() {
         fpsStart = now;
         fpsFrames = 0;
     }
-    char status[128];
+    char status[256];
     HostTitleStatus_nid_no_patch(status, sizeof(status));
     char text[320];
     std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)%s", title.value, currentFps, static_cast<unsigned long long>(frameNum), status);
