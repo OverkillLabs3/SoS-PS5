@@ -164,6 +164,15 @@ void RunExceptionHandlerInline(int signum, const void* hostContext) {
     handler(signum, &ctx);
 }
 
+// TimedWait.cpp still calls the one-argument form (its declaration of it sits inside an
+// `#ifdef _WIN32` block), and the signature change that added the host context left that reference
+// unresolved on Linux: libkernel.prx carried `undefined symbol: _Z25RunExceptionHandlerInlinei`,
+// which killed the process the moment a thread with a pending guest exception reached a timed wait.
+// Keeping the old arity as a forwarder repairs every stale caller.
+void RunExceptionHandlerInline(int signum) {
+    RunExceptionHandlerInline(signum, nullptr);
+}
+
 // the shared signal number lives with the thread plumbing (Pthread.hpp)
 
 // Titles may hold a thread handle that is not the record AnyPS5's TLS resolves to for the same
