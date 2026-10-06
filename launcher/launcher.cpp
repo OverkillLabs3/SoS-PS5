@@ -48,21 +48,23 @@ const Resolution kResolutions[] = {{0, L"3840 x 2160 (4K)"}, {6, L"2560 x 1440 (
 // Host settings that do not belong in the game's save, read with the Windows profile API from launcher.ini.
 const wchar_t* kLauncherIni = L"\\launcher.ini";
 
-// [Cheats] holds the state each cheat starts with; row is its place in the Cheats group.
-struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int row; };
-const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0},
-                         {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 1},
-                         {L"infinite_magic", L"Infinite Magic (F3)", L"SOS_INFINITE_MAGIC", 107, 2},
-                         {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 4},
-                         {L"jump_height", L"Jump Height 2x (F6)", L"SOS_JUMP_HEIGHT", 106, 5}};
+// [Cheats] holds the state each cheat starts with; column and row are its place in the Cheats group.
+struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int column; int row; };
+const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0, 0},
+                         {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 0, 1},
+                         {L"infinite_magic", L"Infinite Magic (F3)", L"SOS_INFINITE_MAGIC", 107, 0, 2},
+                         {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 1, 0},
+                         {L"jump_height", L"Jump Height 2x (F6)", L"SOS_JUMP_HEIGHT", 106, 1, 1}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
 // damage_multiplier and SOS_DAMAGE_MULTIPLIER exist only for 2x, 4x and 6x; Off is stored as no key.
 const struct { const wchar_t* label; int factor; } kDamageMultipliers[] = {{L"Off", 1}, {L"2x", 2}, {L"4x", 4}, {L"6x", 6}};
 constexpr int kDamageMultiplierRow = 3, kDamageMultiplierId = 108;
-// Listed for information only; nothing about them is stored.
+// Noclip (F9) is not implemented yet: its checkbox stays disabled and nothing about it is stored.
+constexpr int kNoclipRow = 2, kNoclipId = 112;
+// Listed for information only, one per column; nothing about them is stored.
 const wchar_t* const kCheatKeys[] = {L"F7  Add 1000 Blood Orbs", L"F8  Add 10 Upgrade Materials"};
 constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
-constexpr int kCheatKeysRow = 6;
+constexpr int kCheatKeysRow = 4;
 
 // Only the value 1 turns a cheat on.
 bool ReadCheat(const std::wstring& directory, const Cheat& cheat) {
@@ -748,12 +750,14 @@ struct Launcher {
     static constexpr int kWorkAreaMargin = 12;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors.
-    // The Cheats group gets one 32-pixel row per cheat and per cheat key; Play and Exit follow it, or only its header while it is collapsed.
+    // The Cheats group has two columns of 32-pixel rows with the cheat keys in the last row; Play and Exit follow it, or only its header while
+    // it is collapsed. The left column is wider for the Damage Multiplier label and combo.
     static constexpr int kStartupTop = 272, kStartupHeight = 70;
-    static constexpr int kCheatRows = kCheatKeysRow + static_cast<int>(kCheatKeyCount);
+    static constexpr int kCheatRows = kCheatKeysRow + 1;
     static constexpr int kCheatsTop = kStartupTop + kStartupHeight + 12, kCheatsHeight = 70 + 32 * (kCheatRows - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kHeaderTop = kCheatsTop - 4, kCollapsedButtonsTop = kHeaderTop + 30 + 16;
-    static constexpr int kWidth = 440, kHeight = kButtonsTop + 48, kCollapsedHeight = kCollapsedButtonsTop + 48;
+    static constexpr int kWidth = 620, kHeight = kButtonsTop + 48, kCollapsedHeight = kCollapsedButtonsTop + 48;
+    static constexpr int kColumnLeft[] = {44, 360}, kColumnWidth[] = {276, kWidth - 44 - kColumnLeft[1]};
     static constexpr int kCheatsHeaderId = 109;
     struct Placed { HWND control; RECT bounds; HFONT* face; };
     HWND window = nullptr;
@@ -956,8 +960,8 @@ struct Launcher {
             placed.push_back(Placed{handle, RECT{x, y, x + w, y + h}, &face});
             return handle;
         };
-        control(L"STATIC", L"God of War: Sons of Sparta", 0, 24, 16, 392, 34, 0, heading);
-        control(L"BUTTON", L"Display", BS_GROUPBOX, 24, 62, 392, 198, 0, font);
+        control(L"STATIC", L"God of War: Sons of Sparta", 0, 24, 16, kWidth - 48, 34, 0, heading);
+        control(L"BUTTON", L"Display", BS_GROUPBOX, 24, 62, kWidth - 48, 198, 0, font);
         control(L"STATIC", L"Display mode", SS_CENTERIMAGE, 44, 92, 104, 28, 0, font);
         mode = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 152, 92, 244, 200, 101, font);
         control(L"STATIC", L"Resolution", SS_CENTERIMAGE, 44, 130, 104, 28, 0, font);
@@ -965,19 +969,21 @@ struct Launcher {
         // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
         control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
-        control(L"BUTTON", L"Startup", BS_GROUPBOX, 24, kStartupTop, 392, kStartupHeight, 0, font);
-        skip = control(L"BUTTON", L"Skip intro", BS_AUTOCHECKBOX | WS_TABSTOP, 44, kStartupTop + 30, 352, 28, 102, font);
+        control(L"BUTTON", L"Startup", BS_GROUPBOX, 24, kStartupTop, kWidth - 48, kStartupHeight, 0, font);
+        skip = control(L"BUTTON", L"Skip intro", BS_AUTOCHECKBOX | WS_TABSTOP, 44, kStartupTop + 30, kWidth - 88, 28, 102, font);
         cheatsHeader = control(L"BUTTON", nullptr, BS_PUSHBUTTON | WS_TABSTOP, 24, kHeaderTop, 92, 30, kCheatsHeaderId, font);
         const size_t firstCheat = placed.size();
         // The header sits on the group's top edge; WS_CLIPSIBLINGS keeps the frame from being drawn over it.
-        control(L"BUTTON", nullptr, BS_GROUPBOX | WS_CLIPSIBLINGS, 24, kCheatsTop, 392, kCheatsHeight, 0, font);
+        control(L"BUTTON", nullptr, BS_GROUPBOX | WS_CLIPSIBLINGS, 24, kCheatsTop, kWidth - 48, kCheatsHeight, 0, font);
+        auto rowTop = [](int row) { return kCheatsTop + 30 + 32 * row; };
         for (size_t i = 0; i < kCheatCount; ++i) {
-            cheatBoxes[i] = control(L"BUTTON", kCheats[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 44, kCheatsTop + 30 + 32 * kCheats[i].row, 352, 28, kCheats[i].id, font);
+            const Cheat& cheat = kCheats[i];
+            cheatBoxes[i] = control(L"BUTTON", cheat.label, BS_AUTOCHECKBOX | WS_TABSTOP, kColumnLeft[cheat.column], rowTop(cheat.row), kColumnWidth[cheat.column], 28, cheat.id, font);
             SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
-            if (kCheats[i].row + 1 == kDamageMultiplierRow) {  // created here so the tab order follows the rows
-                const int y = kCheatsTop + 30 + 32 * kDamageMultiplierRow;
-                control(L"STATIC", L"Damage Multiplier (F4)", SS_CENTERIMAGE, 44, y, 248, 28, 0, font);
-                damageBox = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 296, y, 100, 200, kDamageMultiplierId, font);
+            if (cheat.column == 0 && cheat.row + 1 == kDamageMultiplierRow) {  // created here so the tab order goes from F1 to F6
+                const int combo = kColumnLeft[0] + kColumnWidth[0] - 100;
+                control(L"STATIC", L"Damage Multiplier (F4)", SS_CENTERIMAGE, kColumnLeft[0], rowTop(kDamageMultiplierRow), combo - 8 - kColumnLeft[0], 28, 0, font);
+                damageBox = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, combo, rowTop(kDamageMultiplierRow), 100, 200, kDamageMultiplierId, font);
             }
         }
         for (const auto& option : kDamageMultipliers) {
@@ -985,12 +991,14 @@ struct Launcher {
             SendMessageW(damageBox, CB_SETITEMDATA, item, static_cast<LPARAM>(option.factor));
             if (option.factor == damageMultiplier) SendMessageW(damageBox, CB_SETCURSEL, item, 0);
         }
+        // Not BS_AUTOCHECKBOX: that one still checks itself on BM_CLICK while disabled.
+        control(L"BUTTON", L"Noclip (F9)", BS_CHECKBOX | WS_TABSTOP | WS_DISABLED, kColumnLeft[1], rowTop(kNoclipRow), kColumnWidth[1], 28, kNoclipId, font);
         for (size_t i = 0; i < kCheatKeyCount; ++i) {
-            control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, 44, kCheatsTop + 30 + 32 * (kCheatKeysRow + static_cast<int>(i)), 352, 28, 0, font);
+            control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, kColumnLeft[i], rowTop(kCheatKeysRow), kColumnWidth[i], 28, 0, font);
         }
         for (size_t i = firstCheat; i < placed.size(); ++i) cheatContents.push_back(placed[i].control);
-        HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, kButtonsTop, 92, 30, IDOK, font);
-        control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, kButtonsTop, 92, 30, IDCANCEL, font);
+        HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, kWidth / 2 - 5 - 92, kButtonsTop, 92, 30, IDOK, font);
+        control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, kWidth / 2 + 5, kButtonsTop, 92, 30, IDCANCEL, font);
 
         SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Windowed"));
         SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Borderless Fullscreen"));
