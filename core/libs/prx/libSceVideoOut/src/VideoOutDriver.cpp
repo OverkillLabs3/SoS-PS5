@@ -500,11 +500,13 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                     throw ProcessShutdown{};
                 }
                 padInput.HandleEvent(event, window);
+                window.HandleEvent(event);
                 if (window.Handle() != nullptr) {
                     mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
                     keyboardInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
                 }
             }
+            window.UpdateCursor();
             padInput.Update();
             if (current) {
                 require(current->timing != nullptr, "missing presentation timing");

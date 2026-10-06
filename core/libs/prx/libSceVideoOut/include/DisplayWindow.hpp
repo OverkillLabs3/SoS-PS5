@@ -7,6 +7,7 @@
 inline constexpr std::uint32_t DisplayWindowMinimumWidth = 320;
 inline constexpr std::uint32_t DisplayWindowMinimumHeight = 180;
 inline constexpr std::uint32_t DisplayWindowInitialSizePercent = 60;
+inline constexpr std::uint64_t DisplayWindowCursorHideDelayMs = 5000;
 
 class DisplayWindow {
 public:
@@ -21,6 +22,8 @@ public:
     void DrawableSize(std::uint32_t& width, std::uint32_t& height) const;
     void UpdateTitle();
     void ToggleFullscreen();
+    void HandleEvent(const SDL_Event& event);
+    void UpdateCursor();
 
 private:
     void create(std::uint32_t sourceWidth, std::uint32_t sourceHeight);
@@ -34,6 +37,8 @@ private:
     SDL_Window* window = nullptr;
     std::uint32_t aspectWidth = 0;
     std::uint32_t aspectHeight = 0;
+    std::uint64_t lastMouseMotion = 0;
+    bool cursorHidden = false;
 };
 
 #endif
