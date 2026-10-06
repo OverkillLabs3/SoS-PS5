@@ -108,18 +108,36 @@ void requireAlignment(std::size_t alignment) {
     if (alignment == 0 || (alignment & (alignment - 1)) != 0) throw std::invalid_argument("application heap: invalid alignment");
 }
 
+void finalize();
+bool exitFinalizerRegistered = false;
+
 void finalize() {
     Initialize finalizeCallback;
     {
         std::lock_guard lock(heapMutex);
         if (heapFailure) std::rethrow_exception(heapFailure);
-        if (heapFinalized) throw std::runtime_error("application heap: duplicate finalization");
+        // Finalization is idempotent: the load-time registration and the heap handshake can both
+        // reach it, and a second pass has nothing left to do.
+        if (heapFinalized) return;
         finalizeCallback = heapFinalize;
     }
     if (finalizeCallback != nullptr) finalizeCallback();
     std::lock_guard lock(heapMutex);
     heapFinalized = true;
 }
+
+// std::atexit runs handlers in reverse registration order. The application heap has to outlive
+// every other exit handler: the title's own teardown frees and realigns through it (measured:
+// app.elf+0x822e2c calls the aligned-realloc path during exit), so registering the finalizer while
+// this library is loaded - before any guest module registers a destructor or an atexit callback -
+// makes it the last handler to run instead of an early one. Without this, exit aborts with
+// "application heap: allocator has been finalized".
+struct ExitFinalizerRegistration {
+    ExitFinalizerRegistration() {
+        if (std::atexit(finalize) == 0) exitFinalizerRegistered = true;
+    }
+};
+ExitFinalizerRegistration exitFinalizerRegistration;
 
 }
 
@@ -166,7 +184,8 @@ void ApplicationHeapInitialize_nid_no_patch(const void* processParameters) {
                 std::lock_guard lock(heapMutex);
                 heapFinalize = read<Initialize>(replacement, 0x18);
             }
-            if (std::atexit(finalize) != 0) throw std::runtime_error("application heap: cannot register finalization");
+            if (!exitFinalizerRegistered && std::atexit(finalize) != 0)
+                throw std::runtime_error("application heap: cannot register finalization");
         } catch (...) {
             std::lock_guard lock(heapMutex);
             heapFailure = std::current_exception();
