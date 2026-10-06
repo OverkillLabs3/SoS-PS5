@@ -2,6 +2,8 @@
 #include "prx/libc/include/GuestHeap.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <array>
+#include "prx/common/StderrLog.hpp"
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -73,11 +75,23 @@ TValue read(const void* pointer, std::size_t offset) {
     return value;
 }
 
+// A raw dump carries no kernel-filled libc parameter block, so the PS5 heap handshake
+// (sceKernelRtldSetApplicationHeapAPI / _init_env) never happens on Linux. Adopt the built-in
+// guest heap instead of aborting on the first allocation. Call with heapMutex held.
+void adoptUnregisteredApi() {
+#ifdef __linux__
+    if (heapApi[0] == nullptr && !heapFailure && !heapFinalized) heapApi = defaultApi();
+#endif
+}
+
 template<typename TCallback>
 TCallback callback(std::size_t index) {
+#if defined(__linux__)
+#endif
     std::lock_guard lock(heapMutex);
     if (heapFailure) std::rethrow_exception(heapFailure);
     if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
+    adoptUnregisteredApi();
     if (heapApi[index] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");
     static_assert(sizeof(TCallback) == sizeof(void*));
     TCallback result;
@@ -110,6 +124,8 @@ void finalize() {
 }
 
 void ApplicationHeapRegister_nid_no_patch(void* const* api) {
+    if (std::getenv("APS5_TRACE_SCRIPTING") != nullptr)
+        aps5::LogErr("[heap] register api= %p\n", api);
     if (api == nullptr) throw std::invalid_argument("application heap: null allocator API");
     std::array<void*, 10> replacement;
     std::memcpy(replacement.data(), api, sizeof(replacement));
@@ -123,11 +139,17 @@ void ApplicationHeapRegister_nid_no_patch(void* const* api) {
     std::lock_guard lock(heapMutex);
     if (heapFailure) std::rethrow_exception(heapFailure);
     if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
-    if (heapApi[0] != nullptr && heapApi != replacement) throw std::runtime_error("application heap: cannot replace an active allocator");
+    // The built-in default stays provisional: a game that registers its own allocator later
+    // (the PS5 heap handshake can arrive after the first allocation on Linux) replaces it.
+    if (heapApi[0] != nullptr && heapApi != replacement && heapApi != defaultApi())
+        throw std::runtime_error("application heap: cannot replace an active allocator");
     heapApi = replacement;
 }
 
+
 void ApplicationHeapInitialize_nid_no_patch(const void* processParameters) {
+    if (std::getenv("APS5_TRACE_SCRIPTING") != nullptr)
+        aps5::LogErr("[heap] initialize params= %p\n", processParameters);
     std::call_once(heapInitialization, [processParameters] {
         try {
             if (read<std::uint64_t>(processParameters, 0) < 0x40 || read<std::uint32_t>(processParameters, 8) != 0x4942524f) throw std::runtime_error("application heap: invalid process parameters");
@@ -194,9 +216,12 @@ void* ApplicationHeapRealign_nid_no_patch(void* pointer, std::size_t bytes, std:
     requireAlignment(alignment);
     Realign realign;
     {
+#if defined(__linux__)
+    #endif
         std::lock_guard lock(heapMutex);
         if (heapFailure) std::rethrow_exception(heapFailure);
         if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
+        adoptUnregisteredApi();
         if (heapApi[0] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");
         if (heapApi[5] != nullptr) std::memcpy(&realign, &heapApi[5], sizeof(realign));
         else realign = defaultRealign;
@@ -226,4 +251,41 @@ int ApplicationHeapPosixAlign_nid_no_patch(void** pointer, std::size_t alignment
     if (reinterpret_cast<std::uintptr_t>(result) % alignment != 0) throw std::runtime_error("application heap: allocator returned a misaligned pointer");
     *pointer = result;
     return 0;
+}
+
+extern "C" {
+
+// The title's managed runtime looks these up by name at run time (an RTLD_DEFAULT-style dlsym)
+// instead of importing them, and they are absent from the vendored libc, so the runtime ends up with
+// a null scripting allocator and leaves managed objects unconstructed. Alignment-first, matching the
+// application-heap primitive each one wraps.
+void* APS5_VABI scriptingGetMem(std::size_t alignment, std::size_t bytes) {
+    static std::atomic<unsigned> calls;
+    const unsigned seen = calls.fetch_add(1) + 1;
+    // The scripting heap is the runtime's own memory, deliberately *not* the allocator the title
+    // registered through the application-heap API: that pool has its own bump cursor, and serving the
+    // managed runtime from it hands the same pages out twice. Guards match the reference
+    // implementations (KytyPS5 `KernelApplicationHeapGetMem`): alignment is floored at 0x10, and a
+    // non-power-of-two alignment is rejected - which also self-tests the argument order, because a
+    // size would rarely be a power of two and would otherwise look like a plausible allocation.
+    if (alignment < 0x10u) alignment = 0x10u;
+    if ((alignment & (alignment - 1u)) != 0u) {
+        if (std::getenv("APS5_TRACE_SCRIPTING") != nullptr)
+            aps5::LogErr("[scripting] get #%u rejected a=0x%zx n=0x%zx\n", seen, alignment, bytes);
+        return nullptr;
+    }
+    void* result = GuestHeap::GuestHeapAlign_nid_postfix(alignment, bytes);
+    if (std::getenv("APS5_TRACE_SCRIPTING") != nullptr && seen <= 12)
+        aps5::LogErr("[scripting] get #%u a=0x%zx n=0x%zx -> %p\n", seen, alignment, bytes, result);
+    return result;
+}
+
+void APS5_VABI scriptingFreeMem(void* pointer) {
+    static std::atomic<unsigned> frees;
+    const unsigned seen = frees.fetch_add(1) + 1;
+    if (std::getenv("APS5_TRACE_SCRIPTING") != nullptr && seen <= 12)
+        aps5::LogErr("[scripting] free #%u %p\n", seen, pointer);
+    GuestHeap::GuestHeapFree_nid_postfix(pointer);
+}
+
 }
