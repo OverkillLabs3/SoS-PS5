@@ -122,6 +122,12 @@ bool ReadLadderGrabWithUp(const std::wstring& directory) {
     return wcscmp(value, L"1") == 0;
 }
 
+bool ReadRevealFullMap(const std::wstring& directory) {
+    wchar_t value[8] = {};
+    GetPrivateProfileStringW(L"QualityOfLife", L"RevealFullMap", L"0", value, 8, (directory + kLauncherIni).c_str());
+    return wcscmp(value, L"1") == 0;
+}
+
 // The profile API adds a new section right below the last line. After Play has saved, every section header but the first is
 // preceded by exactly one blank line and trailing blank lines are dropped; other lines stay as they are. A UTF-16 file is left alone.
 void SeparateIniSections(const std::wstring& path) {
@@ -772,7 +778,7 @@ struct Launcher {
     // size, so moving between monitors cannot add up rounding errors.
     // The Quality of Life section includes the two-line Skip dialogue hint; the Cheats section has two columns with the cheat keys in the
     // last row. A collapsed section keeps only its header, and what follows moves up.
-    static constexpr int kQualityTop = 272, kQualityRows = 3, kSkipDialogueHint = 50;
+    static constexpr int kQualityTop = 272, kQualityRows = 4, kSkipDialogueHint = 50;
     static constexpr int kQualityHeight = 70 + 32 * (kQualityRows - 1) + kSkipDialogueHint;
     static constexpr int kCheatRows = kCheatKeysRow + 1;
     static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 70 + 32 * (kCheatRows - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
@@ -792,6 +798,7 @@ struct Launcher {
     HWND skip = nullptr;
     HWND skipDialogueBox = nullptr;
     HWND ladderGrabBox = nullptr;
+    HWND revealFullMapBox = nullptr;
     HFONT font = nullptr, heading = nullptr;
     std::vector<Placed> placed;
     int chosen = -1;
@@ -799,6 +806,7 @@ struct Launcher {
     bool skipIntro = false;
     bool skipDialogue = false;
     bool ladderGrabWithUp = false;
+    bool revealFullMap = false;
     bool play = false;
     HWND cheatBoxes[kCheatCount] = {};
     bool cheats[kCheatCount] = {};
@@ -959,6 +967,7 @@ struct Launcher {
             self->skipIntro = SendMessageW(self->skip, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->skipDialogue = SendMessageW(self->skipDialogueBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->ladderGrabWithUp = SendMessageW(self->ladderGrabBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            self->revealFullMap = SendMessageW(self->revealFullMapBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
             for (size_t i = 0; i < kCheatCount; ++i) self->cheats[i] = SendMessageW(self->cheatBoxes[i], BM_GETCHECK, 0, 0) == BST_CHECKED;
             for (size_t i = 0; i < kMultiplierCount; ++i) {
@@ -983,8 +992,9 @@ struct Launcher {
         skipIntro = ReadSkipIntro(directory);
         skipDialogue = ReadSkipDialogue(directory);
         ladderGrabWithUp = ReadLadderGrabWithUp(directory);
+        revealFullMap = ReadRevealFullMap(directory);
         // Each section starts expanded when one of its options is on; collapsing or expanding it later is not stored.
-        qualityExpanded = skipIntro || skipDialogue || ladderGrabWithUp;
+        qualityExpanded = skipIntro || skipDialogue || ladderGrabWithUp || revealFullMap;
         cheatsExpanded = std::any_of(std::begin(multipliers), std::end(multipliers), [](int factor) { return factor != 1; }) ||
                          std::find(std::begin(cheats), std::end(cheats), true) != std::end(cheats);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
@@ -1050,6 +1060,7 @@ struct Launcher {
         control(L"STATIC", L"Press A (Xbox), Cross (PlayStation),\nEnter or Space to skip the current line.", 0, 64, kQualityTop + 30 + 32 + 28 + 2,
                 kWidth - 108, 48, 0, font);
         ladderGrabBox = checkBox(L"Grab ladders with Up", 44, kQualityTop + 30 + 32 * 2 + kSkipDialogueHint, kWidth - 88, 114);
+        revealFullMapBox = checkBox(L"Reveal full Map", 44, kQualityTop + 30 + 32 * 3 + kSkipDialogueHint, kWidth - 88, 115);
         for (size_t i = firstQuality; i < placed.size(); ++i) qualityContents.push_back(placed[i].control);
         cheatsHeader = control(L"BUTTON", nullptr, BS_PUSHBUTTON | WS_TABSTOP, 24, kCheatsTop - kHeaderOffset, 92, 30, kCheatsHeaderId, font);
         const size_t firstCheat = placed.size();
@@ -1086,6 +1097,7 @@ struct Launcher {
         SendMessageW(skip, BM_SETCHECK, skipIntro ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(skipDialogueBox, BM_SETCHECK, skipDialogue ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(ladderGrabBox, BM_SETCHECK, ladderGrabWithUp ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(revealFullMapBox, BM_SETCHECK, revealFullMap ? BST_CHECKED : BST_UNCHECKED, 0);
 
         const int fromFile = ReadResolutionFile(directory);
         const int current = fromFile >= 0 ? fromFile : ReadIntSetting(directory, kResolutionKey);
@@ -1141,6 +1153,9 @@ struct Launcher {
         if (play && ladderGrabWithUp != ReadLadderGrabWithUp(directory) &&
             !saveIni(L"QualityOfLife", L"LadderGrabWithUp", ladderGrabWithUp ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Grab ladders with Up setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
+        }
+        if (play && revealFullMap != ReadRevealFullMap(directory) && !saveIni(L"QualityOfLife", L"RevealFullMap", revealFullMap ? L"1" : L"0")) {
+            MessageBoxW(nullptr, L"The Reveal full Map setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
         for (size_t i = 0; i < kCheatCount; ++i) {
             if (play && cheats[i] != ReadCheat(directory, kCheats[i].key) && !saveIni(L"Cheats", kCheats[i].key, cheats[i] ? L"1" : L"0")) {
@@ -1242,6 +1257,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     bool skipIntro = false;
     bool skipDialogue = false;
     bool ladderGrabWithUp = false;
+    bool revealFullMap = false;
     {
         Launcher launcher;
         if (!launcher.Run(directory, gameIcon)) return 0;
@@ -1251,6 +1267,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         skipIntro = launcher.skipIntro;
         skipDialogue = launcher.skipDialogue;
         ladderGrabWithUp = launcher.ladderGrabWithUp;
+        revealFullMap = launcher.revealFullMap;
     }
 
     const std::wstring runtime = directory + L"\\" + kRuntime;
@@ -1330,6 +1347,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     SetEnvironmentVariableW(L"SOS_SKIP_INTRO", skipIntro ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_SKIP_DIALOGUE", skipDialogue ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_LADDER_GRAB_WITH_UP", ladderGrabWithUp ? L"1" : nullptr);
+    SetEnvironmentVariableW(L"SOS_REVEAL_FULL_MAP", revealFullMap ? L"1" : nullptr);
     for (size_t i = 0; i < kCheatCount; ++i) SetEnvironmentVariableW(kCheats[i].variable, cheats[i] ? L"1" : nullptr);
     for (size_t i = 0; i < kMultiplierCount; ++i) {
         SetEnvironmentVariableW(kMultipliers[i].variable, multipliers[i] != 1 ? std::to_wstring(multipliers[i]).c_str() : nullptr);
