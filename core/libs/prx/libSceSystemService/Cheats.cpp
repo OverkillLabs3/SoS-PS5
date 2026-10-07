@@ -11,22 +11,30 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <windows.h>
+#include <tlhelp32.h>
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/HostExtension/include/HostExtension.hpp"
 #include "prx/libSceAvPlayer/include/SafeTransition.hpp"
 
 namespace {
 
-// Sons of Sparta player cheats, patched into Il2cppUserAssemblies when this library loads. Offsets are module RVAs.
+// Sons of Sparta player cheats. A cheat's patches are in Il2cppUserAssemblies only while it is on: off is the game's own code, byte
+// for byte. Offsets are module RVAs.
+
+struct Site;
 
 struct Cheat {
     const char* name;
     const char* label;
     const char* variable;
-    std::atomic<int>* factor = nullptr;  // a multiplier's state, used instead of on: 1 (off), 2, 4 or 6
-    std::atomic<bool> on{false};
-    bool hooked = false;
+    std::atomic<int>* factor = nullptr;  // a multiplier's magnitude, used instead of active: 1 (off), 2, 4 or 6
+    Site* sites[3] = {};
+    std::size_t siteCount = 0;
+    std::atomic<bool> active{false};
+    bool available = false;  // its game code is recognised and its patches are built
+    bool failed = false;     // it is off but its patch is still in the game
     std::atomic<const char*> notice{nullptr};
     std::atomic<std::uint64_t> noticeUntil{0};
 };
@@ -68,7 +76,8 @@ struct Award {
 Award bloodOrbs{"Blood Orbs", " +1000", kBloodOrb, std::size(kBloodOrb), 1000, true, kBloodOrbsQueued, kBloodOrbsRunning};
 Award upgradeMaterials{"Upgrade Materials", " +10", kUpgradeMaterials, std::size(kUpgradeMaterials), 10, false, kUpgradeMaterialsQueued,
                        kUpgradeMaterialsRunning};
-const char* awardsUnavailable = "game code not recognised";  // null once the wallet hook is installed
+// Null while the keys work; written by whichever thread removes the wallet hook and read by the window thread.
+std::atomic<const char*> awardsUnavailable{"game code not recognised"};
 const char* const kUnavailable = ": unavailable";
 
 // SDL scancodes
@@ -185,9 +194,11 @@ bool OnPlayer(void* component) {
     return Alive(component) && gameObject != nullptr && reinterpret_cast<IsPlayer>(game + kIsPlayer)(gameObject(component), nullptr);
 }
 
+// A patch is in the game only while its cheat is on, so the state checks below only matter for a call already in flight when it goes off.
+
 // The green health bar is current minus grey health: keep both full and drop changes that would shrink it. The method still runs.
 bool HoldFull(void* vitals, float* amount, bool grey) {
-    if (!godMode.on.load(std::memory_order_relaxed) || !OnPlayer(vitals)) return false;
+    if (!godMode.active.load(std::memory_order_relaxed) || !OnPlayer(vitals)) return false;
     Field<float>(vitals, kCurrentHp) = Field<float>(vitals, kMaxHp);
     Field<float>(vitals, kGreyHp) = 0.0f;
     if (grey ? *amount > 0.0f : *amount < 0.0f) *amount = 0.0f;
@@ -198,7 +209,7 @@ bool APS5_VABI HealthFilter(void* vitals, void*, void*, float* amount) { return 
 bool APS5_VABI GreyHealthFilter(void* vitals, void*, void*, float* amount) { return HoldFull(vitals, amount, true); }
 
 bool APS5_VABI SpiritFilter(void* spirit, void*, void*, float* amount) {
-    if (!infiniteSpirit.on.load(std::memory_order_relaxed) || !OnPlayer(spirit)) return false;
+    if (!infiniteSpirit.active.load(std::memory_order_relaxed) || !OnPlayer(spirit)) return false;
     Field<float>(spirit, kCurrentSpirit) = Field<float>(spirit, kMaxSpirit);
     *amount = 0.0f;
     return false;
@@ -209,7 +220,7 @@ bool APS5_VABI SpiritFilter(void* spirit, void*, void*, float* amount) {
 float APS5_VABI ManaAfterOffset(void* mana, float amount) {
     float current = Field<float>(mana, kCurrentMana);
     const float max = Field<float>(mana, kMaxMana);
-    if (infiniteMagic.on.load(std::memory_order_relaxed) && OnPlayer(mana)) {
+    if (infiniteMagic.active.load(std::memory_order_relaxed) && OnPlayer(mana)) {
         current = max;
         if (amount < 0.0f) amount = 0.0f;
     }
@@ -251,7 +262,7 @@ void APS5_VABI ApplyHitDamage(void* hit) {
 // Replaces ExecuteHitEvent's ApplyForce(direction * strength) on the hit's target, its knockback. Only the horizontal push is removed, so a
 // hit that launches upward still does.
 void APS5_VABI HitImpulse(void* movement, Vector2 force, const void* method) {
-    if (noKnockback.on.load(std::memory_order_relaxed) && OnPlayer(movement)) force.x = 0.0f;
+    if (noKnockback.active.load(std::memory_order_relaxed) && OnPlayer(movement)) force.x = 0.0f;
     Field<ApplyForce>(Field<void*>(movement, 0), kApplyForceSlot)(movement, force, method);
 }
 
@@ -264,7 +275,7 @@ bool InHitReaction(void* movement) {
 // Replaces TickPseudoPhysics's slope alignment of the root motion delta. During the player's hit reaction that root motion is the
 // reaction's own knockback, such as the contact-damage slide.
 Vector2 APS5_VABI RootMotionDelta(void* movement, Vector2 delta) {
-    if (noKnockback.on.load(std::memory_order_relaxed) && InHitReaction(movement) && OnPlayer(movement)) delta.x = 0.0f;
+    if (noKnockback.active.load(std::memory_order_relaxed) && InHitReaction(movement) && OnPlayer(movement)) delta.x = 0.0f;
     return Game<SlopeAligned>(kSlopeAligned)(movement, delta, nullptr);
 }
 
@@ -272,7 +283,7 @@ Vector2 APS5_VABI RootMotionDelta(void* movement, Vector2 delta) {
 // knockback and root motion are added after it.
 Vector2 APS5_VABI MovementInputDelta(void* movement) {
     const Vector2 delta = Game<SlopeAligned>(kSlopeAligned)(movement, Field<Vector2>(movement, kInputDelta), nullptr);
-    if (!movementSpeed.on.load(std::memory_order_relaxed) || !OnPlayer(movement)) return delta;
+    if (!movementSpeed.active.load(std::memory_order_relaxed) || !OnPlayer(movement)) return delta;
     return {delta.x * 2.0f, delta.y * 2.0f};
 }
 
@@ -589,7 +600,7 @@ int IgnoredPairs(int p) {
 void* APS5_VABI BlockedAheadHit(std::uint8_t* hit) {
     void* collider = Game<HitCollider>(kHitCollider)(hit, nullptr);
     void* movement = Field<void*>(hit, kHitToPlayerMovement);
-    if (collider == nullptr || movement == nullptr || !gatePass.on.load(std::memory_order_relaxed)) return collider;
+    if (collider == nullptr || movement == nullptr || !gatePass.active.load(std::memory_order_relaxed)) return collider;
     const int id = Field<int>(hit, kHitColliderId);
     const auto player = reinterpret_cast<std::uintptr_t>(movement);
     if (crossing.player == player && CrossingMember(id)) return nullptr;
@@ -694,7 +705,7 @@ void GatePassTick(void* movement, Vector2 delta) {
         if (now - crossing.lastTick < kGateStaleMs) return;
         EndCrossing();
     }
-    const bool on = gatePass.on.load(std::memory_order_relaxed);
+    const bool on = gatePass.active.load(std::memory_order_relaxed);
     if (crossing.family != kNoPass) {
         ContinueCrossing(movement, delta, now, on);
         return;
@@ -782,27 +793,25 @@ const char* Give(const Award& award, void* controller, const char** item) {
     return nullptr;
 }
 
-// Gives the wallet action back (idle) however its run ends.
-struct WalletActionRun {
-    WalletActionRun() = default;
-    WalletActionRun(const WalletActionRun&) = delete;
-    WalletActionRun& operator=(const WalletActionRun&) = delete;
-    ~WalletActionRun() { walletAction.store(kIdle); }
-};
+// The hook that services an action is installed only while one is pending, so PlayerController.Update is the game's own empty method at
+// rest. Both are defined with the patch mechanism, below.
+const char* InstallWalletHook();
+void RemoveWalletHook();
 
 __attribute__((noinline)) void RunWalletAction(void* controller) {
     int state = walletAction.load(std::memory_order_relaxed);
     if (state != kBloodOrbsQueued && state != kUpgradeMaterialsQueued) return;
     Award& award = state == kBloodOrbsQueued ? bloodOrbs : upgradeMaterials;
     if (!walletAction.compare_exchange_strong(state, award.running)) return;  // given up meanwhile
-    const WalletActionRun run;
     const char* item = nullptr;
-    const char* failure = Give(award, controller, &item);
+    const char* const failure = Give(award, controller, &item);
+    RemoveWalletHook();                // before the action is given back, so a new request cannot install while this one is removed
+    walletAction.store(kIdle);
     Notify(award, failure, item);
 }
 
-// PlayerController.Update, every frame on the game thread. The run is a separate function because a SysV function here cannot have
-// cleanups, and the release is a destructor.
+// PlayerController.Update, on the game thread, for as long as one action is pending. The run is a separate function because a SysV
+// function here cannot have cleanups.
 bool APS5_VABI ControllerFilter(void* controller, void*, void*, float*) {
     RunWalletAction(controller);
     return false;
@@ -813,6 +822,7 @@ void ExpireRequest(std::uint64_t now) {
     int state = walletAction.load();
     if ((state != kBloodOrbsQueued && state != kUpgradeMaterialsQueued) || now < walletRequestedAt.load() + kAwardWaitMs) return;
     if (!walletAction.compare_exchange_strong(state, kIdle)) return;  // the game thread took it meanwhile
+    RemoveWalletHook();
     Award& award = state == kBloodOrbsQueued ? bloodOrbs : upgradeMaterials;
     Notify(award, "no player in the game", nullptr);
 }
@@ -820,8 +830,8 @@ void ExpireRequest(std::uint64_t now) {
 // F7 or F8: queues its action unless a wallet action is queued or running. The expiry also runs here because the title, which runs it
 // otherwise, is only updated while frames are presented.
 void Request(Award& award) {
-    if (awardsUnavailable != nullptr) {
-        Notify(award, awardsUnavailable, nullptr);
+    if (const char* const unavailable = awardsUnavailable.load()) {
+        Notify(award, unavailable, nullptr);
         return;
     }
     const std::uint64_t now = NowMs();
@@ -829,6 +839,10 @@ void Request(Award& award) {
     if (walletAction.load() != kIdle) return;
     walletRequestedAt.store(now);      // before the action is queued, so the expiry never reads an older time
     walletAction.store(award.queued);  // only this thread leaves idle
+    if (const char* const failure = InstallWalletHook()) {
+        walletAction.store(kIdle);
+        Notify(award, failure, nullptr);
+    }
 }
 
 // Entry hook: the method starts with mov rax, hook; jmp rax. The hook calls filter(this, rsi, rdx, &xmm0) with the arguments kept and
@@ -852,14 +866,6 @@ constexpr std::size_t kHookFilter = 17;
 constexpr std::uint8_t kJumpBack[] = {0xff, 0x25, 0, 0, 0, 0};  // jmp qword ptr [rip], followed by the address
 constexpr std::size_t kEntryJump = 12;                         // mov rax, hook; jmp rax
 
-// prologue: the method's first whole instructions, at least kEntryJump bytes, with no rip-relative operand and no jump into them; a
-// shorter (empty) method is copied whole and the entry jump overwrites the padding after it.
-struct Patch {
-    std::uint32_t method;
-    std::size_t prologue;
-    Filter filter;
-};
-
 struct Range { std::uint32_t begin, end; };
 
 // FNV-1a of relocation-free code, so it only matches the analysed game build; the ranges include every byte a patch replaces.
@@ -869,32 +875,6 @@ std::uint64_t Hash(std::initializer_list<Range> code) {
         for (std::uint32_t offset = range.begin; offset < range.end; ++offset) hash = (hash ^ game[offset]) * 0x100000001b3;
     }
     return hash;
-}
-
-bool Hook(const Patch& patch) {
-    std::uint8_t* method = game + patch.method;
-    const std::size_t size = sizeof(kHookStart) + patch.prologue + sizeof(kJumpBack) + sizeof(void*);
-    auto* hook = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    if (hook == nullptr) return false;
-    const void* resume = method + patch.prologue;
-    std::memcpy(hook, kHookStart, sizeof(kHookStart));
-    std::memcpy(hook + kHookFilter, &patch.filter, sizeof(patch.filter));
-    std::memcpy(hook + sizeof(kHookStart), method, patch.prologue);
-    std::memcpy(hook + sizeof(kHookStart) + patch.prologue, kJumpBack, sizeof(kJumpBack));
-    std::memcpy(hook + sizeof(kHookStart) + patch.prologue + sizeof(kJumpBack), &resume, sizeof(resume));
-    std::uint8_t jump[kEntryJump] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0};
-    std::memcpy(jump + 2, &hook, sizeof(hook));
-    DWORD hookProtection = 0, gameProtection = 0;
-    if (!VirtualProtect(hook, size, PAGE_EXECUTE_READ, &hookProtection) ||
-        !VirtualProtect(method, sizeof(jump), PAGE_EXECUTE_READWRITE, &gameProtection)) {
-        VirtualFree(hook, 0, MEM_RELEASE);
-        return false;
-    }
-    std::memcpy(method, jump, sizeof(jump));
-    VirtualProtect(method, sizeof(jump), gameProtection, &gameProtection);
-    FlushInstructionCache(GetCurrentProcess(), hook, size);
-    FlushInstructionCache(GetCurrentProcess(), method, sizeof(jump));
-    return true;
 }
 
 // Call sites rewritten in place to mov rdi, rbx; mov rax, function; call rax, padded with nops. At each site the stack is aligned for the
@@ -924,47 +904,51 @@ constexpr std::uint8_t kHitImpulseCallBytes[] = {0xff, 0x90, 0x38, 0x02, 0x00, 0
 // call GetSlopeAlignedVersionOfMovementDelta(rootMotion.netVelocity * deltaTime)
 constexpr std::uint8_t kRootMotionDeltaCallBytes[] = {0xe8, 0xdc, 0x65, 0xfe, 0xff};
 
-// Replaces the game's code at site, if it still holds original, with code of the same size.
-template <std::size_t size> bool Rewrite(std::uint32_t site, const std::uint8_t (&original)[size], const std::uint8_t (&code)[size]) {
-    std::uint8_t* at = game + site;
-    if (std::memcmp(at, original, size) != 0) return false;
-    DWORD protection = 0;
-    if (!VirtualProtect(at, size, PAGE_EXECUTE_READWRITE, &protection)) return false;
-    std::memcpy(at, code, size);
-    VirtualProtect(at, size, protection, &protection);
-    FlushInstructionCache(GetCurrentProcess(), at, size);
+constexpr std::size_t kMaxPatch = 40;
+
+// One stretch of game code a cheat replaces. original and patched are built once, while the game code is recognised; nothing is written to
+// the game until the cheat is turned on, and turning it off puts original back.
+struct Site {
+    std::uint32_t rva;
+    std::uint8_t size;
+    std::uint8_t returnTo = 0;  // offset the installed call returns into; 0 when nothing returns into the site
+    bool installed = false;
+    std::uint8_t original[kMaxPatch] = {};
+    std::uint8_t patched[kMaxPatch] = {};
+};
+Site healthSite{kOffsetHp, kEntryJump};
+Site greyHealthSite{kOffsetGreyHp, kEntryJump};
+Site spiritSite{kOffsetSpirit, kEntryJump};
+Site manaSite{kManaClamp, sizeof(kManaClampBytes)};
+Site hitDamageSite{kHitDamageCall, sizeof(kHitDamageCallBytes)};
+Site hitImpulseSite{kHitImpulseCall, sizeof(kHitImpulseCallBytes)};
+Site rootMotionSite{kRootMotionDeltaCall, sizeof(kRootMotionDeltaCallBytes)};
+Site inputDeltaSite{kInputDeltaCall, sizeof(kInputDeltaCallBytes)};
+Site jumpDirectionSite{kJumpDirectionCall, sizeof(kJumpDirectionCallBytes)};
+Site gateMoveSite{kGateMoveCall, sizeof(kGateMoveCallBytes)};
+Site blockedAheadSite{kBlockedAheadHitCall, sizeof(kBlockedAheadHitBytes)};
+Site physicsLockSite{kPhysicsLock, kEntryJump};
+Site walletSite{kControllerUpdate, kEntryJump};
+Site* const kWalletSites[] = {&walletSite};
+
+// Every site above, so that no cheat can restore bytes that belong to another one.
+struct Patched { std::uint32_t begin, size; };
+constexpr Patched kPatched[] = {
+    {kOffsetHp, kEntryJump}, {kOffsetGreyHp, kEntryJump}, {kOffsetSpirit, kEntryJump}, {kManaClamp, sizeof(kManaClampBytes)},
+    {kHitDamageCall, sizeof(kHitDamageCallBytes)}, {kHitImpulseCall, sizeof(kHitImpulseCallBytes)},
+    {kRootMotionDeltaCall, sizeof(kRootMotionDeltaCallBytes)}, {kInputDeltaCall, sizeof(kInputDeltaCallBytes)},
+    {kJumpDirectionCall, sizeof(kJumpDirectionCallBytes)}, {kGateMoveCall, sizeof(kGateMoveCallBytes)},
+    {kBlockedAheadHitCall, sizeof(kBlockedAheadHitBytes)}, {kPhysicsLock, kEntryJump}, {kControllerUpdate, kEntryJump}};
+constexpr bool Valid() {
+    for (std::size_t i = 0; i < std::size(kPatched); ++i) {
+        if (kPatched[i].size > kMaxPatch) return false;
+        for (std::size_t j = i + 1; j < std::size(kPatched); ++j) {
+            if (kPatched[i].begin < kPatched[j].begin + kPatched[j].size && kPatched[j].begin < kPatched[i].begin + kPatched[i].size) return false;
+        }
+    }
     return true;
 }
-
-bool RedirectInputDelta() {
-    std::uint8_t call[sizeof(kInputDeltaCallBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0x90};
-    const auto function = &MovementInputDelta;
-    std::memcpy(call + 5, &function, sizeof(function));
-    return Rewrite(kInputDeltaCall, kInputDeltaCallBytes, call);
-}
-
-bool RedirectJumpDirection() {
-    std::uint8_t call[sizeof(kJumpDirectionCallBytes)] = {0x4c, 0x8b, 0x73, 0x58, 0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0x90};
-    const auto function = &JumpDirection;
-    std::memcpy(call + 9, &function, sizeof(function));
-    return Rewrite(kJumpDirectionCall, kJumpDirectionCallBytes, call);
-}
-
-bool RedirectManaClamp() {
-    std::uint8_t call[sizeof(kManaClampBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0,
-                                                  0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00};
-    const auto function = &ManaAfterOffset;
-    std::memcpy(call + 5, &function, sizeof(function));
-    return Rewrite(kManaClamp, kManaClampBytes, call);
-}
-
-bool RedirectHitDamage() {
-    std::uint8_t call[sizeof(kHitDamageCallBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0,
-                                                      0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00};
-    const auto function = &ApplyHitDamage;
-    std::memcpy(call + 5, &function, sizeof(function));
-    return Rewrite(kHitDamageCall, kHitDamageCallBytes, call);
-}
+static_assert(Valid(), "cheat patches must fit in a site and must not overlap");
 
 void GateMoveCall(std::uint8_t (&call)[sizeof(kGateMoveCallBytes)]) {
     // vmovaps xmm0, [rbp - 0x20]; vmovss xmm1, [rbp - 0x50] (deltaTime); mov rdi, rbx; mov rax, GateMove; call rax; nops
@@ -1001,29 +985,6 @@ constexpr std::uint8_t kObserveStart[] = {
 constexpr std::size_t kObserveFunction = 64;
 static_assert(kObserveStart[kObserveFunction - 2] == 0x48 && kObserveStart[kObserveFunction - 1] == 0xb8 && sizeof(kObserveStart) == 136);
 
-template <std::size_t size> std::uint8_t* ObserveEntry(std::uint32_t site, const std::uint8_t (&prologue)[size], Observer observer) {
-    static_assert(size >= kEntryJump);
-    const std::size_t hookSize = sizeof(kObserveStart) + size + sizeof(kJumpBack) + sizeof(void*);
-    auto* hook = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, hookSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    if (hook == nullptr) return nullptr;
-    const void* resume = game + site + size;
-    std::memcpy(hook, kObserveStart, sizeof(kObserveStart));
-    std::memcpy(hook + kObserveFunction, &observer, sizeof(observer));
-    std::memcpy(hook + sizeof(kObserveStart), prologue, size);
-    std::memcpy(hook + sizeof(kObserveStart) + size, kJumpBack, sizeof(kJumpBack));
-    std::memcpy(hook + sizeof(kObserveStart) + size + sizeof(kJumpBack), &resume, sizeof(resume));
-    std::uint8_t original[kEntryJump], jump[kEntryJump] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0};
-    std::memcpy(original, prologue, sizeof(original));
-    std::memcpy(jump + 2, &hook, sizeof(hook));
-    DWORD protection = 0;
-    if (VirtualProtect(hook, hookSize, PAGE_EXECUTE_READ, &protection) && FlushInstructionCache(GetCurrentProcess(), hook, hookSize) &&
-        Rewrite(site, original, jump)) {
-        return hook;
-    }
-    VirtualFree(hook, 0, MEM_RELEASE);
-    return nullptr;
-}
-
 // A rel32 call reaches only 2 GB, so the evaluator's call goes through a jump allocated below the game module.
 std::uint8_t* NearJump(std::uintptr_t target) {
     SYSTEM_INFO system{};
@@ -1045,87 +1006,315 @@ std::uint8_t* NearJump(std::uintptr_t target) {
     return nullptr;
 }
 
-// All patches or none: with only the collision bypass the run states would still stop short of the gate, with only the movement bypass
-// the player would run into it, and without the lock observer gate IDs would outlive a world transition.
-bool RedirectGatePass() {
-    if (std::memcmp(game + kGateMoveCall, kGateMoveCallBytes, sizeof(kGateMoveCallBytes)) != 0 ||
-        std::memcmp(game + kBlockedAheadHitCall, kBlockedAheadHitBytes, sizeof(kBlockedAheadHitBytes)) != 0 ||
-        std::memcmp(game + kPhysicsLock, kPhysicsLockPrologue, sizeof(kPhysicsLockPrologue)) != 0) {
-        return false;
+constexpr std::size_t kMaxPrologue = 14;
+constexpr std::size_t kMaxStart = sizeof(kObserveStart) > sizeof(kHookStart) ? sizeof(kObserveStart) : sizeof(kHookStart);
+constexpr std::size_t kTrampolineSlot = kMaxStart + kMaxPrologue + sizeof(kJumpBack) + sizeof(void*);
+constexpr std::size_t kHooks = 5;  // health, grey health, spirit, the physics lock observer and the wallet actions
+std::uint8_t* trampolines = nullptr;
+std::size_t trampolinesUsed = 0;
+
+constexpr std::size_t kMaxStopped = 256;
+constexpr std::size_t kMaxStackScan = 1 << 20;  // a backstop; the scan normally ends at the top of the thread's stack
+constexpr int kTransitionTries = 20;
+constexpr DWORD kTransitionWaitMs = 2;
+
+struct Stopped {
+    HANDLE threads[kMaxStopped];
+    std::size_t count = 0;
+};
+
+void Resume(Stopped& stopped) {
+    while (stopped.count > 0) {
+        const HANDLE thread = stopped.threads[--stopped.count];
+        ResumeThread(thread);
+        CloseHandle(thread);
     }
-    const std::uint8_t* jump = NearJump(reinterpret_cast<std::uintptr_t>(&BlockedAheadHit));
-    if (jump == nullptr) return false;
-    const std::int64_t offset = jump - (game + kBlockedAheadHitCall + sizeof(kBlockedAheadHitBytes));
-    if (offset < std::numeric_limits<std::int32_t>::min() || offset > std::numeric_limits<std::int32_t>::max()) return false;
-    std::uint8_t call[sizeof(kBlockedAheadHitBytes)] = {0xe8};
-    const auto relative = static_cast<std::int32_t>(offset);
-    std::memcpy(call + 1, &relative, sizeof(relative));
-    std::uint8_t move[sizeof(kGateMoveCallBytes)];
-    GateMoveCall(move);
-    if (!Rewrite(kBlockedAheadHitCall, kBlockedAheadHitBytes, call)) return false;
-    if (Rewrite(kGateMoveCall, kGateMoveCallBytes, move)) {
-        if (ObserveEntry(kPhysicsLock, kPhysicsLockPrologue, &PhysicsLockChanged) != nullptr) return true;
-        Rewrite(kGateMoveCall, move, kGateMoveCallBytes);
-    }
-    Rewrite(kBlockedAheadHitCall, call, kBlockedAheadHitBytes);
-    return false;
 }
 
-// Rewrites site to call jump, a jump near the module to target, padded with nops; returns that jump, or null with the site unchanged.
-template <std::size_t size> std::uint8_t* RedirectCall(std::uint32_t site, const std::uint8_t (&original)[size], std::uintptr_t target) {
-    std::uint8_t* jump = NearJump(target);
-    if (jump == nullptr) return nullptr;
-    std::uint8_t call[size];
-    std::memset(call, 0x90, size);
-    call[0] = 0xe8;
-    const std::int64_t offset = jump - (game + site + 5);
-    if (offset >= std::numeric_limits<std::int32_t>::min() && offset <= std::numeric_limits<std::int32_t>::max()) {
-        const auto relative = static_cast<std::int32_t>(offset);
-        std::memcpy(call + 1, &relative, sizeof(relative));
-        if (Rewrite(site, original, call)) return jump;
+// Game code is rewritten only while every other thread is stopped. Nothing that takes a user-mode lock may run before Resume, because a
+// stopped thread can hold the heap or stdio lock: the snapshot is taken and read before the first thread is stopped, and only system calls
+// that stay in the kernel follow.
+bool Stop(Stopped& stopped) {
+    DWORD ids[kMaxStopped];
+    std::size_t count = 0;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return false;
+    const DWORD process = GetCurrentProcessId(), self = GetCurrentThreadId();
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    bool room = true;
+    for (BOOL more = Thread32First(snapshot, &entry); more && room; more = Thread32Next(snapshot, &entry)) {
+        if (entry.th32OwnerProcessID != process || entry.th32ThreadID == self) continue;
+        room = count < kMaxStopped;
+        if (room) ids[count++] = entry.th32ThreadID;
     }
-    VirtualFree(jump, 0, MEM_RELEASE);
-    return nullptr;
-}
-
-// Both or neither: without the root motion one, a contact-damage hit still slides the player back.
-bool RedirectNoKnockback() {
-    std::uint8_t* hit = RedirectCall(kHitImpulseCall, kHitImpulseCallBytes, reinterpret_cast<std::uintptr_t>(&HitImpulse));
-    if (hit == nullptr) return false;
-    if (RedirectCall(kRootMotionDeltaCall, kRootMotionDeltaCallBytes, reinterpret_cast<std::uintptr_t>(&RootMotionDelta)) != nullptr) return true;
-    std::uint8_t call[sizeof(kHitImpulseCallBytes)];
-    std::memcpy(call, game + kHitImpulseCall, sizeof(call));
-    Rewrite(kHitImpulseCall, call, kHitImpulseCallBytes);
-    VirtualFree(hit, 0, MEM_RELEASE);
-    return false;
-}
-
-// A cheat whose game code is not recognised or cannot be patched stays off and unavailable; the others are not affected.
-bool Install(Cheat& cheat, bool recognised, std::initializer_list<Patch> patches, bool (*redirect)()) {
-    if (!recognised) {
-        std::fprintf(stderr, "%s: game code not recognised, cheat disabled\n", cheat.name);
-        return false;
-    }
-    for (const Patch& patch : patches) {
-        if (!Hook(patch)) {
-            std::fprintf(stderr, "%s: game code could not be patched, cheat disabled\n", cheat.name);
+    CloseHandle(snapshot);
+    if (!room) return false;
+    for (std::size_t i = 0; i < count; ++i) {
+        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, ids[i]);
+        if (thread == nullptr) continue;  // ended between the snapshot and here, so it is not in the code either
+        if (SuspendThread(thread) == static_cast<DWORD>(-1)) {
+            CloseHandle(thread);
             return false;
         }
+        stopped.threads[stopped.count++] = thread;
     }
-    if (redirect != nullptr && !redirect()) {
-        std::fprintf(stderr, "%s: game code could not be patched, cheat disabled\n", cheat.name);
-        return false;
-    }
-    cheat.hooked = true;
-    std::fprintf(stderr, "%s: patch applied\n", cheat.name);
     return true;
 }
 
-void Start(Cheat& cheat, bool recognised, std::initializer_list<Patch> patches, bool (*redirect)() = nullptr) {
-    const char* value = std::getenv(cheat.variable);
-    const bool on = value != nullptr && std::strcmp(value, "1") == 0;
-    std::fprintf(stderr, "%s: %s\n", cheat.name, on ? "ON" : "OFF");
-    if (Install(cheat, recognised, patches, redirect)) cheat.on.store(on);
+bool Inside(std::uintptr_t address, Site* const sites[], std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto begin = reinterpret_cast<std::uintptr_t>(game + sites[i]->rva);
+        if (address >= begin && address < begin + sites[i]->size) return true;
+    }
+    return false;
+}
+
+bool Returns(std::uintptr_t address, Site* const sites[], std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) {
+        if (sites[i]->returnTo != 0 && address == reinterpret_cast<std::uintptr_t>(game + sites[i]->rva + sites[i]->returnTo)) return true;
+    }
+    return false;
+}
+
+// A thread stopped inside the bytes about to be replaced would resume in the middle of an instruction that no longer exists, and so would
+// one inside a replacement called from a rewritten site, because the call returns into the site at an offset that is not an instruction
+// boundary of the original sequence. Such a thread is found by the one return address it must hold, in the live stack above its stack
+// pointer; an entry hook returns through its trampoline instead, so there is nothing to look for.
+bool Outside(const Stopped& stopped, Site* const sites[], std::size_t count) {
+    bool returned = false;
+    for (std::size_t s = 0; s < count; ++s) returned = returned || sites[s]->returnTo != 0;
+    for (std::size_t i = 0; i < stopped.count; ++i) {
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL;
+        if (!GetThreadContext(stopped.threads[i], &context)) return false;
+        if (Inside(static_cast<std::uintptr_t>(context.Rip), sites, count)) return false;
+        if (!returned) continue;
+        const std::uintptr_t stack = static_cast<std::uintptr_t>(context.Rsp) & ~std::uintptr_t{sizeof(void*) - 1};
+        MEMORY_BASIC_INFORMATION region{};
+        if (VirtualQuery(reinterpret_cast<void*>(stack), &region, sizeof(region)) != sizeof(region) || region.State != MEM_COMMIT ||
+            (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+            return false;
+        }
+        const auto committed = reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize;
+        const std::uintptr_t end = committed < stack + kMaxStackScan ? committed : stack + kMaxStackScan;
+        for (std::uintptr_t slot = stack; slot + sizeof(void*) <= end; slot += sizeof(void*)) {
+            if (Returns(*reinterpret_cast<const std::uintptr_t*>(slot), sites, count)) return false;
+        }
+    }
+    return true;
+}
+
+// Writes to is refused unless the site still holds from: bytes that are neither the game's nor ours must not be overwritten.
+bool Write(Site& site, const std::uint8_t* from, const std::uint8_t* to) {
+    std::uint8_t* const at = game + site.rva;
+    if (std::memcmp(at, from, site.size) != 0) return false;
+    DWORD protection = 0;
+    if (!VirtualProtect(at, site.size, PAGE_EXECUTE_READWRITE, &protection)) return false;
+    std::memcpy(at, to, site.size);
+    const bool written = std::memcmp(at, to, site.size) == 0;
+    VirtualProtect(at, site.size, protection, &protection);
+    FlushInstructionCache(GetCurrentProcess(), at, site.size);
+    return written;
+}
+
+// Busy is worth another try later; Mismatch means the code at the site is not the code this cheat knows, so it is left alone.
+enum class Result { Done, Busy, Mismatch };
+
+// Only one thread may be between Stop and Resume: a key press and a finished wallet action can arrive together, and two threads stopping
+// each other would both stay stopped. It is taken before any thread is stopped, so a stopped thread never holds it.
+std::mutex transitions;
+
+// Installs or removes every site of one cheat together: a thread in any of them postpones the whole transition, and a site that cannot be
+// written rolls the earlier ones back. stop is false only before the game runs, when no thread can be in the code yet.
+Result Transition(Site* const sites[], std::size_t count, bool install, bool stop) {
+    const std::lock_guard lock(transitions);
+    for (int attempt = 0; attempt < (stop ? kTransitionTries : 1); ++attempt) {
+        Stopped stopped;
+        const bool ready = !stop || (Stop(stopped) && Outside(stopped, sites, count));
+        std::size_t written = 0;
+        if (ready) {
+            for (; written < count; ++written) {
+                Site& site = *sites[written];
+                if (!Write(site, install ? site.original : site.patched, install ? site.patched : site.original)) break;
+            }
+            if (written < count) {
+                for (std::size_t i = 0; i < written; ++i) {
+                    Site& site = *sites[i];
+                    Write(site, install ? site.patched : site.original, install ? site.original : site.patched);
+                }
+            }
+        }
+        Resume(stopped);
+        if (ready) {
+            if (written < count) return Result::Mismatch;
+            for (std::size_t i = 0; i < count; ++i) sites[i]->installed = install;
+            return Result::Done;
+        }
+        Sleep(kTransitionWaitMs);
+    }
+    return Result::Busy;
+}
+
+// Builds a trampoline and the entry jump to it without touching the game. start is the preamble that calls function, at is where its
+// address goes, and prologue the method's first whole instructions, at least kEntryJump bytes, with no rip-relative operand and no jump
+// into them; a shorter (empty) method is copied whole and the entry jump overwrites the padding after it.
+template <typename Function>
+bool PrepareEntry(Site& site, const std::uint8_t* start, std::size_t startSize, std::size_t at, Function function, std::size_t prologue) {
+    if (trampolines == nullptr || trampolinesUsed == kHooks || prologue > kMaxPrologue) return false;
+    std::uint8_t* const trampoline = trampolines + kTrampolineSlot * trampolinesUsed++;
+    std::uint8_t* const method = game + site.rva;
+    const void* const resume = method + prologue;
+    std::memcpy(trampoline, start, startSize);
+    std::memcpy(trampoline + at, &function, sizeof(function));
+    std::memcpy(trampoline + startSize, method, prologue);
+    std::memcpy(trampoline + startSize + prologue, kJumpBack, sizeof(kJumpBack));
+    std::memcpy(trampoline + startSize + prologue + sizeof(kJumpBack), &resume, sizeof(resume));
+    const std::uint8_t jump[kEntryJump] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0};
+    std::memcpy(site.original, method, kEntryJump);
+    std::memcpy(site.patched, jump, kEntryJump);
+    std::memcpy(site.patched + 2, &trampoline, sizeof(trampoline));
+    return true;
+}
+
+bool PrepareFilter(Site& site, std::size_t prologue, Filter filter) {
+    return PrepareEntry(site, kHookStart, sizeof(kHookStart), kHookFilter, filter, prologue);
+}
+
+bool PrepareObserver(Site& site, std::size_t prologue, Observer observer) {
+    return PrepareEntry(site, kObserveStart, sizeof(kObserveStart), kObserveFunction, observer, prologue);
+}
+
+// code is the site rewritten to call the replacement; returnTo is taken from where that call ends.
+template <std::size_t size> bool PrepareRewrite(Site& site, const std::uint8_t (&original)[size], const std::uint8_t (&code)[size]) {
+    if (site.size != size || std::memcmp(game + site.rva, original, size) != 0) return false;
+    for (std::size_t i = 0; i + 12 <= size; ++i) {
+        if (code[i] == 0x48 && code[i + 1] == 0xb8 && code[i + 10] == 0xff && code[i + 11] == 0xd0) site.returnTo = static_cast<std::uint8_t>(i + 12);
+    }
+    if (site.returnTo == 0) return false;
+    std::memcpy(site.original, original, size);
+    std::memcpy(site.patched, code, size);
+    return true;
+}
+
+// A call whose only change is its target: rewritten to a rel32 call to a jump near the module, padded with nops. The jump is kept for the
+// process, because a thread can be inside it when the cheat goes off. Only a call that was longer than the rel32 one is returned into.
+template <std::size_t size> bool PrepareNearCall(Site& site, const std::uint8_t (&original)[size], std::uintptr_t target) {
+    static_assert(size >= 5);
+    if (site.size != size || std::memcmp(game + site.rva, original, size) != 0) return false;
+    std::uint8_t* const jump = NearJump(target);
+    if (jump == nullptr) return false;
+    const std::int64_t offset = jump - (game + site.rva + 5);
+    if (offset < std::numeric_limits<std::int32_t>::min() || offset > std::numeric_limits<std::int32_t>::max()) {
+        VirtualFree(jump, 0, MEM_RELEASE);
+        return false;
+    }
+    std::memset(site.patched, 0x90, size);
+    site.patched[0] = 0xe8;
+    const auto relative = static_cast<std::int32_t>(offset);
+    std::memcpy(site.patched + 1, &relative, sizeof(relative));
+    std::memcpy(site.original, original, size);
+    site.returnTo = size > 5 ? 5 : 0;
+    return true;
+}
+
+bool PrepareInputDelta() {
+    std::uint8_t call[sizeof(kInputDeltaCallBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0x90};
+    const auto function = &MovementInputDelta;
+    std::memcpy(call + 5, &function, sizeof(function));
+    return PrepareRewrite(inputDeltaSite, kInputDeltaCallBytes, call);
+}
+
+bool PrepareJumpDirection() {
+    std::uint8_t call[sizeof(kJumpDirectionCallBytes)] = {0x4c, 0x8b, 0x73, 0x58, 0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0x90};
+    const auto function = &JumpDirection;
+    std::memcpy(call + 9, &function, sizeof(function));
+    return PrepareRewrite(jumpDirectionSite, kJumpDirectionCallBytes, call);
+}
+
+bool PrepareManaClamp() {
+    std::uint8_t call[sizeof(kManaClampBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0,
+                                                  0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00};
+    const auto function = &ManaAfterOffset;
+    std::memcpy(call + 5, &function, sizeof(function));
+    return PrepareRewrite(manaSite, kManaClampBytes, call);
+}
+
+bool PrepareHitDamage() {
+    std::uint8_t call[sizeof(kHitDamageCallBytes)] = {0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0,
+                                                      0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00};
+    const auto function = &ApplyHitDamage;
+    std::memcpy(call + 5, &function, sizeof(function));
+    return PrepareRewrite(hitDamageSite, kHitDamageCallBytes, call);
+}
+
+bool PrepareGateMove() {
+    std::uint8_t move[sizeof(kGateMoveCallBytes)];
+    GateMoveCall(move);
+    return PrepareRewrite(gateMoveSite, kGateMoveCallBytes, move);
+}
+
+bool PrepareBlockedAhead() { return PrepareNearCall(blockedAheadSite, kBlockedAheadHitBytes, reinterpret_cast<std::uintptr_t>(&BlockedAheadHit)); }
+
+// SetPhysicsLockState is only observed, so the bytes the trampoline copies must be the instructions it was analysed with.
+bool PreparePhysicsLock() {
+    return std::memcmp(game + kPhysicsLock, kPhysicsLockPrologue, sizeof(kPhysicsLockPrologue)) == 0 &&
+           PrepareObserver(physicsLockSite, sizeof(kPhysicsLockPrologue), &PhysicsLockChanged);
+}
+
+bool PrepareHitImpulse() { return PrepareNearCall(hitImpulseSite, kHitImpulseCallBytes, reinterpret_cast<std::uintptr_t>(&HitImpulse)); }
+
+bool PrepareRootMotion() { return PrepareNearCall(rootMotionSite, kRootMotionDeltaCallBytes, reinterpret_cast<std::uintptr_t>(&RootMotionDelta)); }
+
+void SyncSafeTransition() { SafeTransition::Set(movementSpeed.active.load() || jumpFactor.load() != 1); }
+
+// AvPlayer source opening is serialized for the whole time a movement patch is installed: set before it goes in, cleared after it is out.
+bool SerializesAvPlayer(const Cheat& cheat) { return &cheat == &movementSpeed || &cheat == &jumpHeight; }
+
+bool Enable(Cheat& cheat, bool stop) {
+    if (SerializesAvPlayer(cheat)) SafeTransition::Set(true);
+    const Result result = Transition(cheat.sites, cheat.siteCount, true, stop);
+    if (result != Result::Done) {
+        if (SerializesAvPlayer(cheat)) SyncSafeTransition();
+        if (result == Result::Mismatch) cheat.available = false;
+        std::fprintf(stderr, result == Result::Mismatch ? "%s: unavailable, its game code could not be patched\n"
+                                                        : "%s: not turned on, the game was running this code\n", cheat.name);
+        return false;
+    }
+    cheat.active.store(true);
+    return true;
+}
+
+// The cheat stops taking effect before its code is removed, so a call already in flight behaves as off. A restore the game was too busy
+// for is tried again on the next key press; code that is no longer ours is left as it is for good.
+void Disable(Cheat& cheat, bool stop) {
+    cheat.active.store(false);
+    const Result result = Transition(cheat.sites, cheat.siteCount, false, stop);
+    cheat.failed = result != Result::Done;
+    if (cheat.failed) {
+        if (result == Result::Mismatch) cheat.available = false;
+        std::fprintf(stderr, result == Result::Mismatch
+                                 ? "%s: still patched, its original game code could not be restored; the cheat has no effect\n"
+                                 : "%s: still patched, the game was running this code; the cheat has no effect, press again\n", cheat.name);
+    }
+    if (SerializesAvPlayer(cheat)) SyncSafeTransition();
+}
+
+const char* InstallWalletHook() {
+    const Result result = Transition(kWalletSites, std::size(kWalletSites), true, true);
+    if (result == Result::Done) return nullptr;
+    return result == Result::Mismatch ? "game code could not be patched" : "the game was running this code";
+}
+
+// Removing the entry jump from inside the trampoline is safe: what follows the filter is the copied first instruction of the method, never
+// the entry again.
+void RemoveWalletHook() {
+    const Result result = Transition(kWalletSites, std::size(kWalletSites), false, true);
+    if (result == Result::Done) return;
+    awardsUnavailable.store("PlayerController.Update is still patched");
+    std::fprintf(stderr, result == Result::Mismatch
+                             ? "Blood Orbs and Upgrade Materials: the game's own PlayerController.Update could not be restored, keys disabled\n"
+                             : "Blood Orbs and Upgrade Materials: the game was running PlayerController.Update, keys disabled\n");
 }
 
 const char* FactorText(int factor) { return factor == 2 ? "2x" : factor == 4 ? "4x" : factor == 6 ? "6x" : "OFF"; }
@@ -1140,22 +1329,49 @@ int StartingFactor(const Cheat& cheat) {
     return 1;
 }
 
-void StartMultiplier(Cheat& cheat, bool recognised, bool (*redirect)()) {
-    const int factor = StartingFactor(cheat);
-    std::fprintf(stderr, "%s: %s\n", cheat.name, FactorText(factor));
-    if (Install(cheat, recognised, {}, redirect)) cheat.factor->store(factor);
+// A cheat whose game code is not recognised stays unavailable; the others are not affected.
+void Bind(Cheat& cheat, bool ready, Site* first, Site* second, Site* third) {
+    cheat.sites[0] = first;
+    cheat.sites[1] = second;
+    cheat.sites[2] = third;
+    cheat.siteCount = third != nullptr ? 3 : second != nullptr ? 2 : 1;
+    cheat.available = ready;
+    if (!ready) std::fprintf(stderr, "%s: unavailable (game code not recognised)\n", cheat.name);
 }
 
-void SyncSafeTransition() { SafeTransition::Set(movementSpeed.on.load() || jumpFactor.load() != 1); }
+// Nothing is written to the game for a cheat the launcher leaves off.
+void Start(Cheat& cheat, bool ready, Site* first, Site* second = nullptr, Site* third = nullptr) {
+    Bind(cheat, ready, first, second, third);
+    if (!cheat.available) return;
+    const char* const value = std::getenv(cheat.variable);
+    if (value == nullptr || std::strcmp(value, "1") != 0) {
+        std::fprintf(stderr, "%s: OFF\n", cheat.name);
+    } else if (Enable(cheat, false)) {
+        std::fprintf(stderr, "%s: ON\n", cheat.name);
+    }
+}
 
-// The title text of a cheat that is on, or null.
+void StartMultiplier(Cheat& cheat, bool ready, Site* first, Site* second = nullptr) {
+    Bind(cheat, ready, first, second, nullptr);
+    if (!cheat.available) return;
+    const int factor = StartingFactor(cheat);
+    if (factor == 1) {
+        std::fprintf(stderr, "%s: OFF\n", cheat.name);
+    } else if (Enable(cheat, false)) {
+        cheat.factor->store(factor);
+        std::fprintf(stderr, "%s: %s\n", cheat.name, FactorText(factor));
+    }
+}
+
+// The title text of a cheat whose patch is installed or stuck, or null.
 const char* ActiveState(const Cheat& cheat) {
-    if (cheat.factor == nullptr) return cheat.on.load() ? "ON" : nullptr;
+    if (cheat.failed) return "FAILED";
+    if (cheat.factor == nullptr) return cheat.active.load() ? "ON" : nullptr;
     const int factor = cheat.factor->load();
     return factor == 1 ? nullptr : FactorText(factor);
 }
 
-// Runs on the window thread, where game objects must not be touched: keys only switch states or queue a wallet action.
+// Runs on the window thread, where game objects must not be touched: keys only install or remove patches and queue a wallet action.
 void OnKey(int scancode) {
     if (scancode == kBloodOrbsKey || scancode == kUpgradeMaterialsKey) {
         Request(scancode == kBloodOrbsKey ? bloodOrbs : upgradeMaterials);
@@ -1171,19 +1387,33 @@ void OnKey(int scancode) {
                  : scancode == kNoKnockbackKey   ? &noKnockback
                                                  : nullptr;
     if (cheat == nullptr) return;
-    const char* notice = "unavailable";
-    if (cheat->factor != nullptr && cheat->hooked) {
+    const char* notice = nullptr;
+    if (cheat->failed) {
+        if (cheat->available) Disable(*cheat, true);  // a restore the game was too busy for
+        notice = cheat->failed ? nullptr : "OFF";
+    } else if (!cheat->available) {
+        notice = "unavailable";
+    } else if (cheat->factor != nullptr) {
         const int factor = cheat->factor->load();
         const int next = factor == 1 ? 2 : factor == 2 ? 4 : factor == 4 ? 6 : 1;
-        cheat->factor->store(next);
-        notice = next == 1 ? "OFF" : nullptr;
-    } else if (cheat->hooked) {
-        const bool on = !cheat->on.load();
-        cheat->on.store(on);
-        notice = on ? nullptr : "OFF";
+        if (factor == 1) {
+            if (Enable(*cheat, true)) cheat->factor->store(next);
+            else notice = cheat->available ? "busy" : "unavailable";
+        } else if (next == 1) {
+            cheat->factor->store(1);  // before the patch goes out, so a call already inside it leaves the value alone
+            Disable(*cheat, true);
+            notice = cheat->failed ? nullptr : "OFF";
+        } else {
+            cheat->factor->store(next);
+        }
+    } else if (cheat->active.load()) {
+        Disable(*cheat, true);
+        notice = cheat->failed ? nullptr : "OFF";
+    } else if (!Enable(*cheat, true)) {
+        notice = cheat->available ? "busy" : "unavailable";
     }
-    if (cheat->hooked && (cheat == &movementSpeed || cheat == &jumpHeight)) SyncSafeTransition();
-    std::fprintf(stderr, "%s: %s\n", cheat->name, notice != nullptr ? notice : ActiveState(*cheat));
+    const char* const state = notice != nullptr ? notice : ActiveState(*cheat);
+    std::fprintf(stderr, "%s: %s\n", cheat->name, state != nullptr ? state : "OFF");
     cheat->notice.store(notice);
     cheat->noticeUntil.store(notice != nullptr ? NowMs() + kNoticeMs : 0);
 }
@@ -1208,47 +1438,67 @@ void TitleStatus(char* text, std::size_t size) {
     }
 }
 
+bool ArmTrampolines() {
+    DWORD protection = 0;
+    if (trampolines == nullptr || !VirtualProtect(trampolines, kTrampolineSlot * kHooks, PAGE_EXECUTE_READ, &protection)) return false;
+    FlushInstructionCache(GetCurrentProcess(), trampolines, kTrampolineSlot * kHooks);
+    return true;
+}
+
 bool StartCheats() {
     game = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(L"Il2cppUserAssemblies.prx.guest.prx"));
     if (game == nullptr) return false;
     const auto* headers = reinterpret_cast<const IMAGE_NT_HEADERS*>(game + reinterpret_cast<const IMAGE_DOS_HEADER*>(game)->e_lfanew);
     const bool fits = headers->OptionalHeader.SizeOfImage >= kGetGameObject + sizeof(void*);
-    const bool godModeRecognised = fits && Hash({{0x80ecd0, 0x80f0b0}, {0xdab1a0, 0xdab6b0}, {0xdabaf0, 0xdabd90}}) == 0x4b6beba820a6ebce;
-    Start(godMode, godModeRecognised, {{kOffsetHp, 12, HealthFilter}, {kOffsetGreyHp, 13, GreyHealthFilter}});
-    Start(infiniteSpirit, fits && Hash({{0xda20b0, 0xda2520}, {0xda2b10, 0xda2d10}, {0x80ecd0, 0x80f0b0}}) == 0xb0e9d2c9cfd2a0b1,
-        {{kOffsetSpirit, 12, SpiritFilter}});
-    const bool magicRecognised = fits && Hash({{0xd954f0, 0xd95bd0}, {0xdf2980, 0xdf2bc0}, {0x823d20, 0x823e30}, {0xc26550, 0xc26750},
-        {0xc1af20, 0xc1afe0}, {0x80ecd0, 0x80f0b0}}) == 0xa63f97d69c46ad8d;
-    Start(infiniteMagic, magicRecognised, {}, RedirectManaClamp);
-    const bool damageRecognised = fits && Hash({{0xd91d00, 0xd92910}, {0xd83100, 0xd837d0}, {0xdf3900, 0xdf3be0}, {0xdf3e60, 0xdf4e00},
-        {0xdf98d0, 0xdf9af0}, {0xd94d70, 0xd95120}, {0x80ecd0, 0x80f0b0}}) == 0x7b452922017e03ec;
-    StartMultiplier(damageMultiplier, damageRecognised, RedirectHitDamage);
-    const bool awardsRecognised = fits && Hash({{0x32fac0, 0x32fae0}, {0x5d12d0, 0x5d1390}, {0x5d35c0, 0x5d35d0}, {0x8c0810, 0x8c0950},
-        {0x8c91b0, 0x8c92b0}, {0x8ce0f0, 0x8ce6d0}, {0x996d20, 0x996e70}, {0x9971b0, 0x997390}, {0xd11230, 0xd11300}}) == 0xdcbbc10a00bb8f1e;
-    if (awardsRecognised) awardsUnavailable = Hook({kControllerUpdate, 1, ControllerFilter}) ? nullptr : "game code could not be patched";
-    if (awardsUnavailable != nullptr) {
-        std::fprintf(stderr, "Blood Orbs and Upgrade Materials: %s, keys disabled\n", awardsUnavailable);
-    } else {
-        std::fprintf(stderr, "Blood Orbs and Upgrade Materials: patch applied\n");
-    }
-    const bool movementRecognised = fits && Hash({{0x706620, 0x706b50}, {0x6ecf20, 0x6ed280}, {0x6f02e0, 0x6f06d0}, {0x708d70, 0x709360},
-        {0x80ecd0, 0x80f0b0}}) == 0xe4fb67f213ff4921;
-    Start(movementSpeed, movementRecognised, {}, RedirectInputDelta);
-    const bool jumpRecognised = fits && Hash({{0x6fc450, 0x6fcbf0}, {0x6face0, 0x6fb1b0}, {0x6efe80, 0x6f0180}, {0x6f0810, 0x6f08e0},
-        {0x708d70, 0x709360}, {0x80ecd0, 0x80f0b0}}) == 0x6b8174068fca8cd1;
-    StartMultiplier(jumpHeight, jumpRecognised, RedirectJumpDirection);
-    // After the movement and jump checks: their hashes cover the move call this rewrites.
-    Start(gatePass, fits && Hash({{0x706a5b, 0x706b50}, {0x6edc60, 0x6edf30}, {0xc309a0, 0xc30f00}, {0x443bb00, 0x443bbe0}, {0x44273f0, 0x4427460},
+    trampolines = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, kTrampolineSlot * kHooks, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
+    // Recognising the game code and building the patches leaves the game untouched; only a cheat the launcher turns on is installed below.
+    // The hashes read the game's own bytes, so the ranges that leave out what another cheat rewrites are part of their constant and must
+    // stay as they are.
+    const bool godModeReady = fits && Hash({{0x80ecd0, 0x80f0b0}, {0xdab1a0, 0xdab6b0}, {0xdabaf0, 0xdabd90}}) == 0x4b6beba820a6ebce &&
+        PrepareFilter(healthSite, 12, HealthFilter) && PrepareFilter(greyHealthSite, 13, GreyHealthFilter);
+    const bool spiritReady = fits && Hash({{0xda20b0, 0xda2520}, {0xda2b10, 0xda2d10}, {0x80ecd0, 0x80f0b0}}) == 0xb0e9d2c9cfd2a0b1 &&
+        PrepareFilter(spiritSite, 12, SpiritFilter);
+    const bool magicReady = fits && Hash({{0xd954f0, 0xd95bd0}, {0xdf2980, 0xdf2bc0}, {0x823d20, 0x823e30}, {0xc26550, 0xc26750},
+        {0xc1af20, 0xc1afe0}, {0x80ecd0, 0x80f0b0}}) == 0xa63f97d69c46ad8d && PrepareManaClamp();
+    const bool damageReady = fits && Hash({{0xd91d00, 0xd92910}, {0xd83100, 0xd837d0}, {0xdf3900, 0xdf3be0}, {0xdf3e60, 0xdf4e00},
+        {0xdf98d0, 0xdf9af0}, {0xd94d70, 0xd95120}, {0x80ecd0, 0x80f0b0}}) == 0x7b452922017e03ec && PrepareHitDamage();
+    const bool awardsReady = fits && Hash({{0x32fac0, 0x32fae0}, {0x5d12d0, 0x5d1390}, {0x5d35c0, 0x5d35d0}, {0x8c0810, 0x8c0950},
+        {0x8c91b0, 0x8c92b0}, {0x8ce0f0, 0x8ce6d0}, {0x996d20, 0x996e70}, {0x9971b0, 0x997390}, {0xd11230, 0xd11300}}) == 0xdcbbc10a00bb8f1e &&
+        PrepareFilter(walletSite, 1, ControllerFilter);
+    const bool movementReady = fits && Hash({{0x706620, 0x706b50}, {0x6ecf20, 0x6ed280}, {0x6f02e0, 0x6f06d0}, {0x708d70, 0x709360},
+        {0x80ecd0, 0x80f0b0}}) == 0xe4fb67f213ff4921 && PrepareInputDelta();
+    const bool jumpReady = fits && Hash({{0x6fc450, 0x6fcbf0}, {0x6face0, 0x6fb1b0}, {0x6efe80, 0x6f0180}, {0x6f0810, 0x6f08e0},
+        {0x708d70, 0x709360}, {0x80ecd0, 0x80f0b0}}) == 0x6b8174068fca8cd1 && PrepareJumpDirection();
+    const bool gateReady = fits && Hash({{0x706a5b, 0x706b50}, {0x6edc60, 0x6edf30}, {0xc309a0, 0xc30f00}, {0x443bb00, 0x443bbe0}, {0x44273f0, 0x4427460},
         {0x4427460, 0x44274c0}, {0x4441ab0, 0x4441b60}, {0x4378a50, 0x4378ae0}, {0x4441290, 0x44412e0}, {0x436cf80, 0x436cfd0},
         {0x436e240, 0x436e290}, {0x436e1f0, 0x436e240}, {0x4384a10, 0x4384a60}, {0x438a190, 0x438a1e0}, {0x438aa20, 0x438aa80},
         {0x43724d0, 0x4372520}, {0x4372580, 0x4372670}, {0x4378440, 0x4378540}, {0x6ef180, 0x6ef350}, {0x6f8c00, 0x6f8cd0}, {0x708d70, 0x709360},
         {0x705110, 0x705320}, {0x7099c0, 0x709ae0}, {0x6fa970, 0x6faa60}, {0x80ecd0, 0x80f0b0}, {0x6ebd10, 0x6ec080},
-        {0x4372720, 0x4372770}, {0x443be00, 0x443be50}, {0x443d620, 0x443d670}}) == 0x4eb00aedc4d92eff, {}, RedirectGatePass);
-    // After Damage Multiplier and Movement Speed, whose hashes cover the calls this rewrites; this hash leaves out the calls they and Pass
-    // Through Gates rewrite.
-    Start(noKnockback, fits && Hash({{0xd91d00, 0xd91e1f}, {0xd91e3c, 0xd92910}, {0xdf5250, 0xdf5c10}, {0x6f0810, 0x6f08e0}, {0x6efe80, 0x6f0180},
+        {0x4372720, 0x4372770}, {0x443be00, 0x443be50}, {0x443d620, 0x443d670}}) == 0x4eb00aedc4d92eff &&
+        PrepareGateMove() && PrepareBlockedAhead() && PreparePhysicsLock();
+    const bool knockbackReady = fits && Hash({{0xd91d00, 0xd91e1f}, {0xd91e3c, 0xd92910}, {0xdf5250, 0xdf5c10}, {0x6f0810, 0x6f08e0}, {0x6efe80, 0x6f0180},
         {0x80ecd0, 0x80f0b0}, {0x706620, 0x7067a9}, {0x7067b9, 0x706b02}, {0x706b26, 0x706b50}, {0x6ecf20, 0x6ed280}, {0x7b8560, 0x7b86b0},
-        {0xdb8320, 0xdb8640}}) == 0x6910b1dbd7438b36, {}, RedirectNoKnockback);
+        {0xdb8320, 0xdb8640}}) == 0x6910b1dbd7438b36 && PrepareHitImpulse() && PrepareRootMotion();
+    const bool armed = ArmTrampolines();
+
+    Start(godMode, godModeReady && armed, &healthSite, &greyHealthSite);
+    Start(infiniteSpirit, spiritReady && armed, &spiritSite);
+    Start(infiniteMagic, magicReady, &manaSite);
+    StartMultiplier(damageMultiplier, damageReady, &hitDamageSite);
+    if (awardsReady && armed) awardsUnavailable.store(nullptr);
+    if (const char* const unavailable = awardsUnavailable.load()) {
+        std::fprintf(stderr, "Blood Orbs and Upgrade Materials: unavailable (%s)\n", unavailable);
+    } else {
+        std::fprintf(stderr, "Blood Orbs and Upgrade Materials: ready\n");
+    }
+    Start(movementSpeed, movementReady, &inputDeltaSite);
+    StartMultiplier(jumpHeight, jumpReady, &jumpDirectionSite);
+    // All three sites or none: with only the collision bypass the run states would still stop short of the gate, with only the movement
+    // bypass the player would run into it, and without the lock observer gate IDs would outlive a world transition.
+    Start(gatePass, gateReady && armed, &gateMoveSite, &blockedAheadSite, &physicsLockSite);
+    // Both or neither: without the root motion one, a contact-damage hit still slides the player back.
+    Start(noKnockback, knockbackReady, &hitImpulseSite, &rootMotionSite);
     SyncSafeTransition();
     HostExtensionRegister_nid_no_patch(OnKey, TitleStatus);
     return true;
