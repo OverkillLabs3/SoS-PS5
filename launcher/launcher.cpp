@@ -54,7 +54,8 @@ const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0
                          {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 0, 1},
                          {L"infinite_magic", L"Infinite Magic (F3)", L"SOS_INFINITE_MAGIC", 107, 0, 2},
                          {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 1, 0},
-                         {L"pass_through_gates", L"Pass Through Gates (F9)", L"SOS_PASS_THROUGH_GATES", 112, 1, 2}};
+                         {L"pass_through_gates", L"Pass Through Gates (F9)", L"SOS_PASS_THROUGH_GATES", 112, 1, 2},
+                         {L"no_knockback", L"No Knockback (F10)", L"SOS_NO_KNOCKBACK", 113, 1, 3}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
 // A multiplier's key and variable exist only for 2x, 4x and 6x; Off is stored as no key. legacy is an earlier on/off key: exactly 1
 // still reads as 2x while the multiplier key holds no valid value, and Play removes it.
