@@ -7,6 +7,10 @@
 #include <mutex>
 #include <stdexcept>
 
+#ifdef _WIN32
+void SkipDialogueCrossPressed();  // SkipDialogueInput.cpp
+#endif
+
 namespace {
     std::mutex stateMutex;
     PadInputState state;
@@ -278,6 +282,10 @@ extern "C" void PadPublishInput_nid_postfix(const PadInputState& input) {
         state.touchLeft == input.touchLeft && state.touchRight == input.touchRight &&
         state.hasMotion == input.hasMotion && state.accel == input.accel && state.gyro == input.gyro &&
         state.touch == input.touch && state.deviceKind == input.deviceKind) return;
+#ifdef _WIN32
+    constexpr std::uint32_t cross = 0x4000;  // Pad::PadButton::Cross
+    if ((~state.buttons & input.buttons & cross) != 0) SkipDialogueCrossPressed();
+#endif
     state = input;
     timestamp = sceKernelGetProcessTime();
 }
