@@ -38,6 +38,7 @@ Cheat damageMultiplier{"Damage Multiplier", "Damage", "SOS_DAMAGE_MULTIPLIER", &
 Cheat movementSpeed{"Movement Speed 2x", "Movement Speed", "SOS_MOVEMENT_SPEED"};
 Cheat jumpHeight{"Jump Height", "Jump Height", "SOS_JUMP_HEIGHT_MULTIPLIER", &jumpFactor};
 Cheat gatePass{"Pass Through Gates", "Pass Through Gates", "SOS_PASS_THROUGH_GATES"};
+Cheat noKnockback{"No Knockback", "No Knockback", "SOS_NO_KNOCKBACK"};
 
 constexpr const char* kBloodOrb[] = {"loot_orb_red"};
 // ItemGroup.Materials without its loot_boss_* trophies, which only their boss gives.
@@ -72,7 +73,7 @@ const char* const kUnavailable = ": unavailable";
 
 // SDL scancodes
 constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kInfiniteMagicKey = 60, kDamageMultiplierKey = 61, kMovementSpeedKey = 62, kJumpHeightKey = 63,
-              kBloodOrbsKey = 64, kUpgradeMaterialsKey = 65, kGatePassKey = 66;
+              kBloodOrbsKey = 64, kUpgradeMaterialsKey = 65, kGatePassKey = 66, kNoKnockbackKey = 67;
 constexpr std::uint64_t kNoticeMs = 2000;
 constexpr std::uint64_t kAwardWaitMs = 1000;
 
@@ -86,6 +87,7 @@ constexpr std::uint32_t kOffsetGreyHp = 0xdabaf0;
 constexpr std::uint32_t kOffsetSpirit = 0xda20b0;
 constexpr std::uint32_t kManaClamp = 0xd95a0f;          // in ManaState.OffsetMana
 constexpr std::uint32_t kHitDamageCall = 0xd91e1f;      // in Hittable.ExecuteHitEvent
+constexpr std::uint32_t kHitImpulseCall = 0xd9249c;     // in Hittable.ExecuteHitEvent
 constexpr std::uint32_t kIsPlayer = 0x80ef70;
 constexpr std::uint32_t kGetGameObject = 0x629c8f0;     // Component.get_gameObject icall pointer, resolved by the game before it is needed
 constexpr std::uint32_t kControllerUpdate = 0x5d35c0;   // PlayerController.Update(), empty
@@ -96,6 +98,7 @@ constexpr std::uint32_t kTryGetWallet = 0x8c0810;
 constexpr std::uint32_t kGetAmount = 0x8ce2b0;
 constexpr std::uint32_t kAddToWallet = 0x8ce430;
 constexpr std::uint32_t kInputDeltaCall = 0x7067a9;     // in PlayerMovement.TickPseudoPhysics
+constexpr std::uint32_t kRootMotionDeltaCall = 0x70693f;  // in PlayerMovement.TickPseudoPhysics
 constexpr std::uint32_t kSlopeAligned = 0x6ecf20;
 constexpr std::uint32_t kJumpDirectionCall = 0x6fc9c7;  // in MoveStateJump.<DelayStartJumping>d__27.MoveNext
 constexpr std::uint32_t kJumpAngle = 0x6face0;
@@ -118,11 +121,13 @@ constexpr std::size_t kHitSource = 0x10, kHitTarget = 0x20, kHitConfig = 0x28, k
 constexpr std::size_t kDamageModule = 0x10, kDamageConfig = 0x10;
 constexpr std::size_t kDamage = 0x10, kUnmodifiableDamage = 0x35;
 constexpr std::size_t kApplyModuleSlot = 0x178;  // vtable slot: method pointer, then MethodInfo
+constexpr std::size_t kApplyForceSlot = 0x238;   // MovementComponent.ApplyForce(Vector2)
 constexpr std::size_t kWalletCount = 0x20;
 constexpr std::size_t kInputDelta = 0xe0;
 constexpr std::size_t kJumpContext = 0x58;
 constexpr std::size_t kForwardAdjustment = 0x9c;
 constexpr std::size_t kRawInputX = 0x2c, kMainCollider = 0x90, kFallingCollider = 0x168, kContactMap = 0x180, kVelocityFromDelta = 0xf8;
+constexpr std::size_t kMovementStateMachine = 0x170, kActiveState = 0xe8, kClassName = 0x10;
 constexpr std::size_t kLeftEdge = 0x18, kRightEdge = 0x20, kEdgeHits = 0x10;
 constexpr std::size_t kHitSize = 0x24, kHitNormal = 0x10, kHitColliderId = 0x20;
 // BlockedAheadHit gets the evaluator's RaycastHit2D at [rbp - 0x70]; its TryGetComponent<PlayerMovement> result is at [rbp - 0x48].
@@ -168,6 +173,7 @@ using IntGetter = int(APS5_VABI*)(void* self, const void* method);
 using ObjectAt = void*(APS5_VABI*)(void* self, int index, const void* method);
 using Position = Vector2(APS5_VABI*)(void* movement, const void* method);
 using MovePosition = void(APS5_VABI*)(void* movement, Vector2 delta, const void* method);
+using ApplyForce = void(APS5_VABI*)(void* movement, Vector2 force, const void* method);
 
 template <typename T> T& Field(void* object, std::size_t offset) { return *reinterpret_cast<T*>(static_cast<std::uint8_t*>(object) + offset); }
 template <typename Function> Function Game(std::uint32_t offset) { return reinterpret_cast<Function>(game + offset); }
@@ -240,6 +246,26 @@ void APS5_VABI ApplyHitDamage(void* hit) {
     damage = original * static_cast<float>(factor);
     apply(module, Field<void*>(hit, kHitArgs), method);
     damage = original;
+}
+
+// Replaces ExecuteHitEvent's ApplyForce(direction * strength) on the hit's target, its knockback. Only the horizontal push is removed, so a
+// hit that launches upward still does.
+void APS5_VABI HitImpulse(void* movement, Vector2 force, const void* method) {
+    if (noKnockback.on.load(std::memory_order_relaxed) && OnPlayer(movement)) force.x = 0.0f;
+    Field<ApplyForce>(Field<void*>(movement, 0), kApplyForceSlot)(movement, force, method);
+}
+
+bool InHitReaction(void* movement) {
+    void* machine = Field<void*>(movement, kMovementStateMachine);
+    void* state = Alive(machine) ? Field<void*>(machine, kActiveState) : nullptr;
+    return Alive(state) && std::strcmp(Field<const char*>(Field<void*>(state, 0), kClassName), "CommonState_HitReaction") == 0;
+}
+
+// Replaces TickPseudoPhysics's slope alignment of the root motion delta. During the player's hit reaction that root motion is the
+// reaction's own knockback, such as the contact-damage slide.
+Vector2 APS5_VABI RootMotionDelta(void* movement, Vector2 delta) {
+    if (noKnockback.on.load(std::memory_order_relaxed) && InHitReaction(movement) && OnPlayer(movement)) delta.x = 0.0f;
+    return Game<SlopeAligned>(kSlopeAligned)(movement, delta, nullptr);
 }
 
 // Replaces TickPseudoPhysics's call to GetSlopeAlignedVersionOfMovementDelta, so only the input movement doubles: gravity, jumps,
@@ -893,6 +919,10 @@ constexpr std::uint8_t kGateMoveCallBytes[] = {0xc5, 0xf8, 0x28, 0x45, 0xe0, 0x4
                                                0xb0, 0xc5, 0xf8, 0x28, 0x4d, 0xe0, 0xc5, 0xf0, 0x5e, 0xc0, 0xc5, 0xf8, 0x13, 0x83, 0xf8, 0x00, 0x00, 0x00};
 // call RaycastHit2D.get_collider: only the call's target changes, so it is redirected through a jump near the module
 constexpr std::uint8_t kBlockedAheadHitBytes[] = {0xe8, 0x39, 0xad, 0x80, 0x03};
+// call qword ptr [rax + 0x238], the target's ApplyForce with its arguments in place: redirected through a jump near the module as well
+constexpr std::uint8_t kHitImpulseCallBytes[] = {0xff, 0x90, 0x38, 0x02, 0x00, 0x00};
+// call GetSlopeAlignedVersionOfMovementDelta(rootMotion.netVelocity * deltaTime)
+constexpr std::uint8_t kRootMotionDeltaCallBytes[] = {0xe8, 0xdc, 0x65, 0xfe, 0xff};
 
 // Replaces the game's code at site, if it still holds original, with code of the same size.
 template <std::size_t size> bool Rewrite(std::uint32_t site, const std::uint8_t (&original)[size], const std::uint8_t (&code)[size]) {
@@ -1041,6 +1071,35 @@ bool RedirectGatePass() {
     return false;
 }
 
+// Rewrites site to call jump, a jump near the module to target, padded with nops; returns that jump, or null with the site unchanged.
+template <std::size_t size> std::uint8_t* RedirectCall(std::uint32_t site, const std::uint8_t (&original)[size], std::uintptr_t target) {
+    std::uint8_t* jump = NearJump(target);
+    if (jump == nullptr) return nullptr;
+    std::uint8_t call[size];
+    std::memset(call, 0x90, size);
+    call[0] = 0xe8;
+    const std::int64_t offset = jump - (game + site + 5);
+    if (offset >= std::numeric_limits<std::int32_t>::min() && offset <= std::numeric_limits<std::int32_t>::max()) {
+        const auto relative = static_cast<std::int32_t>(offset);
+        std::memcpy(call + 1, &relative, sizeof(relative));
+        if (Rewrite(site, original, call)) return jump;
+    }
+    VirtualFree(jump, 0, MEM_RELEASE);
+    return nullptr;
+}
+
+// Both or neither: without the root motion one, a contact-damage hit still slides the player back.
+bool RedirectNoKnockback() {
+    std::uint8_t* hit = RedirectCall(kHitImpulseCall, kHitImpulseCallBytes, reinterpret_cast<std::uintptr_t>(&HitImpulse));
+    if (hit == nullptr) return false;
+    if (RedirectCall(kRootMotionDeltaCall, kRootMotionDeltaCallBytes, reinterpret_cast<std::uintptr_t>(&RootMotionDelta)) != nullptr) return true;
+    std::uint8_t call[sizeof(kHitImpulseCallBytes)];
+    std::memcpy(call, game + kHitImpulseCall, sizeof(call));
+    Rewrite(kHitImpulseCall, call, kHitImpulseCallBytes);
+    VirtualFree(hit, 0, MEM_RELEASE);
+    return false;
+}
+
 // A cheat whose game code is not recognised or cannot be patched stays off and unavailable; the others are not affected.
 bool Install(Cheat& cheat, bool recognised, std::initializer_list<Patch> patches, bool (*redirect)()) {
     if (!recognised) {
@@ -1109,6 +1168,7 @@ void OnKey(int scancode) {
                  : scancode == kMovementSpeedKey ? &movementSpeed
                  : scancode == kJumpHeightKey    ? &jumpHeight
                  : scancode == kGatePassKey      ? &gatePass
+                 : scancode == kNoKnockbackKey   ? &noKnockback
                                                  : nullptr;
     if (cheat == nullptr) return;
     const char* notice = "unavailable";
@@ -1134,7 +1194,7 @@ void TitleStatus(char* text, std::size_t size) {
     ExpireRequest(now);
     std::size_t used = 0;
     if (size != 0) text[0] = '\0';
-    for (const Cheat* cheat : {&godMode, &infiniteSpirit, &infiniteMagic, &damageMultiplier, &movementSpeed, &jumpHeight, &gatePass}) {
+    for (const Cheat* cheat : {&godMode, &infiniteSpirit, &infiniteMagic, &damageMultiplier, &movementSpeed, &jumpHeight, &gatePass, &noKnockback}) {
         const char* state = ActiveState(*cheat);
         if (state == nullptr && now < cheat->noticeUntil.load()) state = cheat->notice.load();
         if (state == nullptr || used >= size) continue;
@@ -1184,6 +1244,11 @@ bool StartCheats() {
         {0x43724d0, 0x4372520}, {0x4372580, 0x4372670}, {0x4378440, 0x4378540}, {0x6ef180, 0x6ef350}, {0x6f8c00, 0x6f8cd0}, {0x708d70, 0x709360},
         {0x705110, 0x705320}, {0x7099c0, 0x709ae0}, {0x6fa970, 0x6faa60}, {0x80ecd0, 0x80f0b0}, {0x6ebd10, 0x6ec080},
         {0x4372720, 0x4372770}, {0x443be00, 0x443be50}, {0x443d620, 0x443d670}}) == 0x4eb00aedc4d92eff, {}, RedirectGatePass);
+    // After Damage Multiplier and Movement Speed, whose hashes cover the calls this rewrites; this hash leaves out the calls they and Pass
+    // Through Gates rewrite.
+    Start(noKnockback, fits && Hash({{0xd91d00, 0xd91e1f}, {0xd91e3c, 0xd92910}, {0xdf5250, 0xdf5c10}, {0x6f0810, 0x6f08e0}, {0x6efe80, 0x6f0180},
+        {0x80ecd0, 0x80f0b0}, {0x706620, 0x7067a9}, {0x7067b9, 0x706b02}, {0x706b26, 0x706b50}, {0x6ecf20, 0x6ed280}, {0x7b8560, 0x7b86b0},
+        {0xdb8320, 0xdb8640}}) == 0x6910b1dbd7438b36, {}, RedirectNoKnockback);
     SyncSafeTransition();
     HostExtensionRegister_nid_no_patch(OnKey, TitleStatus);
     return true;
