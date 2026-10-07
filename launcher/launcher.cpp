@@ -54,13 +54,12 @@ const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0
                          {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 0, 1},
                          {L"infinite_magic", L"Infinite Magic (F3)", L"SOS_INFINITE_MAGIC", 107, 0, 2},
                          {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 1, 0},
-                         {L"jump_height", L"Jump Height 2x (F6)", L"SOS_JUMP_HEIGHT", 106, 1, 1}};
+                         {L"jump_height", L"Jump Height 2x (F6)", L"SOS_JUMP_HEIGHT", 106, 1, 1},
+                         {L"pass_through_gates", L"Pass Through Gates (F9)", L"SOS_PASS_THROUGH_GATES", 112, 1, 2}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
 // damage_multiplier and SOS_DAMAGE_MULTIPLIER exist only for 2x, 4x and 6x; Off is stored as no key.
 const struct { const wchar_t* label; int factor; } kDamageMultipliers[] = {{L"Off", 1}, {L"2x", 2}, {L"4x", 4}, {L"6x", 6}};
 constexpr int kDamageMultiplierRow = 3, kDamageMultiplierId = 108;
-// Noclip (F9) is not implemented yet: its checkbox stays disabled and nothing about it is stored.
-constexpr int kNoclipRow = 2, kNoclipId = 112;
 // Listed for information only, one per column; nothing about them is stored.
 const wchar_t* const kCheatKeys[] = {L"F7  Add 1000 Blood Orbs", L"F8  Add 10 Upgrade Materials"};
 constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
@@ -980,7 +979,7 @@ struct Launcher {
             const Cheat& cheat = kCheats[i];
             cheatBoxes[i] = control(L"BUTTON", cheat.label, BS_AUTOCHECKBOX | WS_TABSTOP, kColumnLeft[cheat.column], rowTop(cheat.row), kColumnWidth[cheat.column], 28, cheat.id, font);
             SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
-            if (cheat.column == 0 && cheat.row + 1 == kDamageMultiplierRow) {  // created here so the tab order goes from F1 to F6
+            if (cheat.column == 0 && cheat.row + 1 == kDamageMultiplierRow) {  // created here so the tab order follows the F keys
                 const int combo = kColumnLeft[0] + kColumnWidth[0] - 100;
                 control(L"STATIC", L"Damage Multiplier (F4)", SS_CENTERIMAGE, kColumnLeft[0], rowTop(kDamageMultiplierRow), combo - 8 - kColumnLeft[0], 28, 0, font);
                 damageBox = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, combo, rowTop(kDamageMultiplierRow), 100, 200, kDamageMultiplierId, font);
@@ -991,8 +990,6 @@ struct Launcher {
             SendMessageW(damageBox, CB_SETITEMDATA, item, static_cast<LPARAM>(option.factor));
             if (option.factor == damageMultiplier) SendMessageW(damageBox, CB_SETCURSEL, item, 0);
         }
-        // Not BS_AUTOCHECKBOX: that one still checks itself on BM_CLICK while disabled.
-        control(L"BUTTON", L"Noclip (F9)", BS_CHECKBOX | WS_TABSTOP | WS_DISABLED, kColumnLeft[1], rowTop(kNoclipRow), kColumnWidth[1], 28, kNoclipId, font);
         for (size_t i = 0; i < kCheatKeyCount; ++i) {
             control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, kColumnLeft[i], rowTop(kCheatKeysRow), kColumnWidth[i], 28, 0, font);
         }
