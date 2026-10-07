@@ -54,38 +54,46 @@ const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0
                          {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 0, 1},
                          {L"infinite_magic", L"Infinite Magic (F3)", L"SOS_INFINITE_MAGIC", 107, 0, 2},
                          {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 1, 0},
-                         {L"jump_height", L"Jump Height 2x (F6)", L"SOS_JUMP_HEIGHT", 106, 1, 1},
                          {L"pass_through_gates", L"Pass Through Gates (F9)", L"SOS_PASS_THROUGH_GATES", 112, 1, 2}};
 constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
-// damage_multiplier and SOS_DAMAGE_MULTIPLIER exist only for 2x, 4x and 6x; Off is stored as no key.
-const struct { const wchar_t* label; int factor; } kDamageMultipliers[] = {{L"Off", 1}, {L"2x", 2}, {L"4x", 4}, {L"6x", 6}};
-constexpr int kDamageMultiplierRow = 3, kDamageMultiplierId = 108;
+// A multiplier's key and variable exist only for 2x, 4x and 6x; Off is stored as no key. legacy is an earlier on/off key: exactly 1
+// still reads as 2x while the multiplier key holds no valid value, and Play removes it.
+struct Multiplier { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int column; int row; int comboWidth; const wchar_t* legacy; };
+const Multiplier kMultipliers[] = {{L"damage_multiplier", L"Damage Multiplier (F4)", L"SOS_DAMAGE_MULTIPLIER", 108, 0, 3, 100, nullptr},
+                                   {L"jump_height_multiplier", L"Jump Height (F6)", L"SOS_JUMP_HEIGHT_MULTIPLIER", 106, 1, 1, 80, L"jump_height"}};
+constexpr size_t kMultiplierCount = sizeof(kMultipliers) / sizeof(kMultipliers[0]);
+const struct { const wchar_t* label; int factor; } kFactors[] = {{L"Off", 1}, {L"2x", 2}, {L"4x", 4}, {L"6x", 6}};
 // Listed for information only, one per column; nothing about them is stored.
 const wchar_t* const kCheatKeys[] = {L"F7  Add 1000 Blood Orbs", L"F8  Add 10 Upgrade Materials"};
 constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
 constexpr int kCheatKeysRow = 4;
 
 // Only the value 1 turns a cheat on.
-bool ReadCheat(const std::wstring& directory, const Cheat& cheat) {
+bool ReadCheat(const std::wstring& directory, const wchar_t* key) {
     wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"Cheats", cheat.key, L"0", value, 8, (directory + kLauncherIni).c_str());
+    GetPrivateProfileStringW(L"Cheats", key, L"0", value, 8, (directory + kLauncherIni).c_str());
     return wcscmp(value, L"1") == 0;
 }
 
-// Only 2, 4 and 6 select a multiplier; anything else is 1, normal damage.
-int ReadDamageMultiplier(const std::wstring& directory) {
+// Only 2, 4 and 6 select a multiplier; anything else is 1, off.
+int ReadFactor(const std::wstring& directory, const wchar_t* key) {
     wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"Cheats", L"damage_multiplier", L"1", value, 8, (directory + kLauncherIni).c_str());
-    for (const auto& option : kDamageMultipliers) {
+    GetPrivateProfileStringW(L"Cheats", key, L"1", value, 8, (directory + kLauncherIni).c_str());
+    for (const auto& option : kFactors) {
         if (std::to_wstring(option.factor) == value) return option.factor;
     }
     return 1;
 }
 
-// The default is a value no one stores, so it comes back only when there is no damage_multiplier key.
-bool HasDamageMultiplier(const std::wstring& directory) {
+int ReadMultiplier(const std::wstring& directory, const Multiplier& multiplier) {
+    const int factor = ReadFactor(directory, multiplier.key);
+    return factor == 1 && multiplier.legacy != nullptr && ReadCheat(directory, multiplier.legacy) ? 2 : factor;
+}
+
+// The default is a value no one stores, so it comes back only when there is no such key.
+bool HasCheatKey(const std::wstring& directory, const wchar_t* key) {
     wchar_t value[2] = {};
-    GetPrivateProfileStringW(L"Cheats", L"damage_multiplier", L"\x01", value, 2, (directory + kLauncherIni).c_str());
+    GetPrivateProfileStringW(L"Cheats", key, L"\x01", value, 2, (directory + kLauncherIni).c_str());
     return value[0] != L'\x01';
 }
 
@@ -771,8 +779,8 @@ struct Launcher {
     bool play = false;
     HWND cheatBoxes[kCheatCount] = {};
     bool cheats[kCheatCount] = {};
-    HWND damageBox = nullptr;
-    int damageMultiplier = 1;
+    HWND multiplierBoxes[kMultiplierCount] = {};
+    int multipliers[kMultiplierCount] = {};
     HWND cheatsHeader = nullptr;
     std::vector<HWND> cheatContents;
     bool cheatsExpanded = false;
@@ -899,9 +907,9 @@ struct Launcher {
             self->skipIntro = SendMessageW(self->skip, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
             for (size_t i = 0; i < kCheatCount; ++i) self->cheats[i] = SendMessageW(self->cheatBoxes[i], BM_GETCHECK, 0, 0) == BST_CHECKED;
-            const LRESULT damageIndex = SendMessageW(self->damageBox, CB_GETCURSEL, 0, 0);
-            if (damageIndex != CB_ERR) {
-                self->damageMultiplier = static_cast<int>(SendMessageW(self->damageBox, CB_GETITEMDATA, static_cast<WPARAM>(damageIndex), 0));
+            for (size_t i = 0; i < kMultiplierCount; ++i) {
+                const LRESULT index = SendMessageW(self->multiplierBoxes[i], CB_GETCURSEL, 0, 0);
+                if (index != CB_ERR) self->multipliers[i] = static_cast<int>(SendMessageW(self->multiplierBoxes[i], CB_GETITEMDATA, static_cast<WPARAM>(index), 0));
             }
             DestroyWindow(hwnd);
             return 0;
@@ -915,12 +923,13 @@ struct Launcher {
     }
     // Shows the settings and saves them when Play is pressed; false means the player closed the launcher instead.
     bool Run(const std::wstring& directory, HICON icon) {
-        for (size_t i = 0; i < kCheatCount; ++i) cheats[i] = ReadCheat(directory, kCheats[i]);
-        damageMultiplier = ReadDamageMultiplier(directory);
+        for (size_t i = 0; i < kCheatCount; ++i) cheats[i] = ReadCheat(directory, kCheats[i].key);
+        for (size_t i = 0; i < kMultiplierCount; ++i) multipliers[i] = ReadMultiplier(directory, kMultipliers[i]);
         borderless = ReadBorderless(directory);
         skipIntro = ReadSkipIntro(directory);
         // Cheats starts expanded when a cheat is on; collapsing or expanding it later is not stored.
-        cheatsExpanded = damageMultiplier != 1 || std::find(std::begin(cheats), std::end(cheats), true) != std::end(cheats);
+        cheatsExpanded = std::any_of(std::begin(multipliers), std::end(multipliers), [](int factor) { return factor != 1; }) ||
+                         std::find(std::begin(cheats), std::end(cheats), true) != std::end(cheats);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
         // scaling the window as a bitmap, as before.
@@ -979,16 +988,19 @@ struct Launcher {
             const Cheat& cheat = kCheats[i];
             cheatBoxes[i] = control(L"BUTTON", cheat.label, BS_AUTOCHECKBOX | WS_TABSTOP, kColumnLeft[cheat.column], rowTop(cheat.row), kColumnWidth[cheat.column], 28, cheat.id, font);
             SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
-            if (cheat.column == 0 && cheat.row + 1 == kDamageMultiplierRow) {  // created here so the tab order follows the F keys
-                const int combo = kColumnLeft[0] + kColumnWidth[0] - 100;
-                control(L"STATIC", L"Damage Multiplier (F4)", SS_CENTERIMAGE, kColumnLeft[0], rowTop(kDamageMultiplierRow), combo - 8 - kColumnLeft[0], 28, 0, font);
-                damageBox = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, combo, rowTop(kDamageMultiplierRow), 100, 200, kDamageMultiplierId, font);
+            for (size_t j = 0; j < kMultiplierCount; ++j) {
+                const Multiplier& multiplier = kMultipliers[j];
+                if (multiplier.column != cheat.column || multiplier.row != cheat.row + 1) continue;  // created here so the tab order follows the F keys
+                const int left = kColumnLeft[multiplier.column], combo = left + kColumnWidth[multiplier.column] - multiplier.comboWidth;
+                control(L"STATIC", multiplier.label, SS_CENTERIMAGE, left, rowTop(multiplier.row), combo - 8 - left, 28, 0, font);
+                multiplierBoxes[j] = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, combo, rowTop(multiplier.row), multiplier.comboWidth, 200,
+                                             multiplier.id, font);
+                for (const auto& option : kFactors) {
+                    const WPARAM item = static_cast<WPARAM>(SendMessageW(multiplierBoxes[j], CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option.label)));
+                    SendMessageW(multiplierBoxes[j], CB_SETITEMDATA, item, static_cast<LPARAM>(option.factor));
+                    if (option.factor == multipliers[j]) SendMessageW(multiplierBoxes[j], CB_SETCURSEL, item, 0);
+                }
             }
-        }
-        for (const auto& option : kDamageMultipliers) {
-            const WPARAM item = static_cast<WPARAM>(SendMessageW(damageBox, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option.label)));
-            SendMessageW(damageBox, CB_SETITEMDATA, item, static_cast<LPARAM>(option.factor));
-            if (option.factor == damageMultiplier) SendMessageW(damageBox, CB_SETCURSEL, item, 0);
         }
         for (size_t i = 0; i < kCheatKeyCount; ++i) {
             control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, kColumnLeft[i], rowTop(kCheatKeysRow), kColumnWidth[i], 28, 0, font);
@@ -1051,14 +1063,22 @@ struct Launcher {
             MessageBoxW(nullptr, L"The Skip intro setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
         for (size_t i = 0; i < kCheatCount; ++i) {
-            if (play && cheats[i] != ReadCheat(directory, kCheats[i]) && !saveIni(L"Cheats", kCheats[i].key, cheats[i] ? L"1" : L"0")) {
+            if (play && cheats[i] != ReadCheat(directory, kCheats[i].key) && !saveIni(L"Cheats", kCheats[i].key, cheats[i] ? L"1" : L"0")) {
                 const std::wstring text = L"The " + std::wstring(kCheats[i].label) + L" setting could not be saved. It is used for this start only.";
                 MessageBoxW(nullptr, text.c_str(), kTitle, MB_OK | MB_ICONWARNING);
             }
         }
-        if (play && (damageMultiplier == 1 ? HasDamageMultiplier(directory) : damageMultiplier != ReadDamageMultiplier(directory)) &&
-            !saveIni(L"Cheats", L"damage_multiplier", damageMultiplier == 1 ? nullptr : std::to_wstring(damageMultiplier).c_str())) {
-            MessageBoxW(nullptr, L"The Damage Multiplier (F4) setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
+        for (size_t i = 0; play && i < kMultiplierCount; ++i) {
+            const Multiplier& multiplier = kMultipliers[i];
+            const int factor = multipliers[i];
+            const bool changed = factor == 1 ? HasCheatKey(directory, multiplier.key) : factor != ReadFactor(directory, multiplier.key);
+            const bool legacy = multiplier.legacy != nullptr && HasCheatKey(directory, multiplier.legacy);
+            // The legacy key is removed only after the new value is saved, so a failed save leaves the old setting in place.
+            if ((changed && !saveIni(L"Cheats", multiplier.key, factor == 1 ? nullptr : std::to_wstring(factor).c_str())) ||
+                (legacy && !saveIni(L"Cheats", multiplier.legacy, nullptr))) {
+                const std::wstring text = L"The " + std::wstring(multiplier.label) + L" setting could not be saved. It is used for this start only.";
+                MessageBoxW(nullptr, text.c_str(), kTitle, MB_OK | MB_ICONWARNING);
+            }
         }
         if (iniChanged) SeparateIniSections(directory + kLauncherIni);
         return play;
@@ -1137,14 +1157,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     bool cheats[kCheatCount] = {};
-    int damageMultiplier = 1;
+    int multipliers[kMultiplierCount] = {};
     bool borderless = false;
     bool skipIntro = false;
     {
         Launcher launcher;
         if (!launcher.Run(directory, gameIcon)) return 0;
         std::copy(std::begin(launcher.cheats), std::end(launcher.cheats), cheats);
-        damageMultiplier = launcher.damageMultiplier;
+        std::copy(std::begin(launcher.multipliers), std::end(launcher.multipliers), multipliers);
         borderless = launcher.borderless;
         skipIntro = launcher.skipIntro;
     }
@@ -1225,7 +1245,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // The runtime reads these choices from its environment; an option that is off has no variable, so an inherited value cannot turn it on.
     SetEnvironmentVariableW(L"SOS_SKIP_INTRO", skipIntro ? L"1" : nullptr);
     for (size_t i = 0; i < kCheatCount; ++i) SetEnvironmentVariableW(kCheats[i].variable, cheats[i] ? L"1" : nullptr);
-    SetEnvironmentVariableW(L"SOS_DAMAGE_MULTIPLIER", damageMultiplier != 1 ? std::to_wstring(damageMultiplier).c_str() : nullptr);
+    for (size_t i = 0; i < kMultiplierCount; ++i) {
+        SetEnvironmentVariableW(kMultipliers[i].variable, multipliers[i] != 1 ? std::to_wstring(multipliers[i]).c_str() : nullptr);
+    }
+    SetEnvironmentVariableW(L"SOS_JUMP_HEIGHT", nullptr);  // the earlier Jump Height switch, which the runtime no longer reads
     PROCESS_INFORMATION process{};
     std::wstring command = L"\"" + runtime + L"\"";
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process)) {

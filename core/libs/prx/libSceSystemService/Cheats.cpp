@@ -24,18 +24,19 @@ struct Cheat {
     const char* name;
     const char* label;
     const char* variable;
+    std::atomic<int>* factor = nullptr;  // a multiplier's state, used instead of on: 1 (off), 2, 4 or 6
     std::atomic<bool> on{false};
     bool hooked = false;
     std::atomic<const char*> notice{nullptr};
     std::atomic<std::uint64_t> noticeUntil{0};
 };
+std::atomic<int> damageFactor{1}, jumpFactor{1};
 Cheat godMode{"God Mode", "God Mode", "SOS_GOD_MODE"};
 Cheat infiniteSpirit{"Infinite Spartan Spirit", "Spartan Spirit", "SOS_INFINITE_SPARTAN_SPIRIT"};
 Cheat infiniteMagic{"Infinite Magic", "Magic", "SOS_INFINITE_MAGIC"};
-Cheat damageMultiplier{"Damage Multiplier", "Damage", "SOS_DAMAGE_MULTIPLIER"};  // its state is damageFactor, not on
-std::atomic<int> damageFactor{1};                                                 // 1 (off), 2, 4 or 6
+Cheat damageMultiplier{"Damage Multiplier", "Damage", "SOS_DAMAGE_MULTIPLIER", &damageFactor};
 Cheat movementSpeed{"Movement Speed 2x", "Movement Speed", "SOS_MOVEMENT_SPEED"};
-Cheat jumpHeight{"Jump Height 2x", "Jump Height", "SOS_JUMP_HEIGHT"};
+Cheat jumpHeight{"Jump Height", "Jump Height", "SOS_JUMP_HEIGHT_MULTIPLIER", &jumpFactor};
 Cheat gatePass{"Pass Through Gates", "Pass Through Gates", "SOS_PASS_THROUGH_GATES"};
 
 constexpr const char* kBloodOrb[] = {"loot_orb_red"};
@@ -133,8 +134,6 @@ constexpr float kTeleportDistance = 1.0f;
 constexpr int kGateAwayTicks = 30;
 constexpr std::uint64_t kGateRequestMs = 250, kGateStaleMs = 500;
 constexpr int kMaxPassMembers = 8, kMaxPassDecisions = 32, kPassDepth = 4, kDefaultLayer = 0;
-// sqrt(2): a jump's height grows with the square of its upward speed, so this doubles the height.
-constexpr float kJumpSpeedFactor = 1.41421356f;
 
 using GetGameObject = void*(APS5_VABI*)(void* component);
 using IsPlayer = bool(APS5_VABI*)(void* gameObject, const void* method);
@@ -255,8 +254,10 @@ Vector2 APS5_VABI MovementInputDelta(void* movement) {
 // impulse. Scripted launches do not go through it.
 Vector2 APS5_VABI JumpDirection(void* jumpState) {
     Vector2 direction = Game<JumpAngle>(kJumpAngle)(jumpState, Field<float>(jumpState, kForwardAdjustment), nullptr);
-    if (!jumpHeight.on.load(std::memory_order_relaxed) || direction.y <= 0.0f || !OnPlayer(Field<void*>(jumpState, kJumpContext))) return direction;
-    direction.y *= kJumpSpeedFactor;
+    const int factor = jumpFactor.load(std::memory_order_relaxed);
+    if (factor == 1 || direction.y <= 0.0f || !OnPlayer(Field<void*>(jumpState, kJumpContext))) return direction;
+    // A jump's height grows with the square of its upward speed, so the speed is scaled by the square root of the height factor.
+    direction.y *= std::sqrt(static_cast<float>(factor));
     return direction;
 }
 
@@ -1070,9 +1071,9 @@ void Start(Cheat& cheat, bool recognised, std::initializer_list<Patch> patches, 
 
 const char* FactorText(int factor) { return factor == 2 ? "2x" : factor == 4 ? "4x" : factor == 6 ? "6x" : "OFF"; }
 
-// Only 2, 4 and 6 select a multiplier; anything else is normal damage.
-int StartingDamageFactor() {
-    const char* value = std::getenv(damageMultiplier.variable);
+// Only 2, 4 and 6 select a multiplier; anything else is off.
+int StartingFactor(const Cheat& cheat) {
+    const char* value = std::getenv(cheat.variable);
     if (value == nullptr) return 1;
     for (int factor : {2, 4, 6}) {
         if (value[0] == '0' + factor && value[1] == '\0') return factor;
@@ -1080,18 +1081,18 @@ int StartingDamageFactor() {
     return 1;
 }
 
-void StartDamageMultiplier(bool recognised) {
-    const int factor = StartingDamageFactor();
-    std::fprintf(stderr, "%s: %s\n", damageMultiplier.name, FactorText(factor));
-    if (Install(damageMultiplier, recognised, {}, RedirectHitDamage)) damageFactor.store(factor);
+void StartMultiplier(Cheat& cheat, bool recognised, bool (*redirect)()) {
+    const int factor = StartingFactor(cheat);
+    std::fprintf(stderr, "%s: %s\n", cheat.name, FactorText(factor));
+    if (Install(cheat, recognised, {}, redirect)) cheat.factor->store(factor);
 }
 
-void SyncSafeTransition() { SafeTransition::Set(movementSpeed.on.load() || jumpHeight.on.load()); }
+void SyncSafeTransition() { SafeTransition::Set(movementSpeed.on.load() || jumpFactor.load() != 1); }
 
 // The title text of a cheat that is on, or null.
 const char* ActiveState(const Cheat& cheat) {
-    if (&cheat != &damageMultiplier) return cheat.on.load() ? "ON" : nullptr;
-    const int factor = damageFactor.load();
+    if (cheat.factor == nullptr) return cheat.on.load() ? "ON" : nullptr;
+    const int factor = cheat.factor->load();
     return factor == 1 ? nullptr : FactorText(factor);
 }
 
@@ -1111,17 +1112,17 @@ void OnKey(int scancode) {
                                                  : nullptr;
     if (cheat == nullptr) return;
     const char* notice = "unavailable";
-    if (cheat == &damageMultiplier && cheat->hooked) {
-        const int factor = damageFactor.load();
+    if (cheat->factor != nullptr && cheat->hooked) {
+        const int factor = cheat->factor->load();
         const int next = factor == 1 ? 2 : factor == 2 ? 4 : factor == 4 ? 6 : 1;
-        damageFactor.store(next);
+        cheat->factor->store(next);
         notice = next == 1 ? "OFF" : nullptr;
     } else if (cheat->hooked) {
         const bool on = !cheat->on.load();
         cheat->on.store(on);
         notice = on ? nullptr : "OFF";
-        if (cheat == &movementSpeed || cheat == &jumpHeight) SyncSafeTransition();
     }
+    if (cheat->hooked && (cheat == &movementSpeed || cheat == &jumpHeight)) SyncSafeTransition();
     std::fprintf(stderr, "%s: %s\n", cheat->name, notice != nullptr ? notice : ActiveState(*cheat));
     cheat->notice.store(notice);
     cheat->noticeUntil.store(notice != nullptr ? NowMs() + kNoticeMs : 0);
@@ -1161,7 +1162,7 @@ bool StartCheats() {
     Start(infiniteMagic, magicRecognised, {}, RedirectManaClamp);
     const bool damageRecognised = fits && Hash({{0xd91d00, 0xd92910}, {0xd83100, 0xd837d0}, {0xdf3900, 0xdf3be0}, {0xdf3e60, 0xdf4e00},
         {0xdf98d0, 0xdf9af0}, {0xd94d70, 0xd95120}, {0x80ecd0, 0x80f0b0}}) == 0x7b452922017e03ec;
-    StartDamageMultiplier(damageRecognised);
+    StartMultiplier(damageMultiplier, damageRecognised, RedirectHitDamage);
     const bool awardsRecognised = fits && Hash({{0x32fac0, 0x32fae0}, {0x5d12d0, 0x5d1390}, {0x5d35c0, 0x5d35d0}, {0x8c0810, 0x8c0950},
         {0x8c91b0, 0x8c92b0}, {0x8ce0f0, 0x8ce6d0}, {0x996d20, 0x996e70}, {0x9971b0, 0x997390}, {0xd11230, 0xd11300}}) == 0xdcbbc10a00bb8f1e;
     if (awardsRecognised) awardsUnavailable = Hook({kControllerUpdate, 1, ControllerFilter}) ? nullptr : "game code could not be patched";
@@ -1175,7 +1176,7 @@ bool StartCheats() {
     Start(movementSpeed, movementRecognised, {}, RedirectInputDelta);
     const bool jumpRecognised = fits && Hash({{0x6fc450, 0x6fcbf0}, {0x6face0, 0x6fb1b0}, {0x6efe80, 0x6f0180}, {0x6f0810, 0x6f08e0},
         {0x708d70, 0x709360}, {0x80ecd0, 0x80f0b0}}) == 0x6b8174068fca8cd1;
-    Start(jumpHeight, jumpRecognised, {}, RedirectJumpDirection);
+    StartMultiplier(jumpHeight, jumpRecognised, RedirectJumpDirection);
     // After the movement and jump checks: their hashes cover the move call this rewrites.
     Start(gatePass, fits && Hash({{0x706a5b, 0x706b50}, {0x6edc60, 0x6edf30}, {0xc309a0, 0xc30f00}, {0x443bb00, 0x443bbe0}, {0x44273f0, 0x4427460},
         {0x4427460, 0x44274c0}, {0x4441ab0, 0x4441b60}, {0x4378a50, 0x4378ae0}, {0x4441290, 0x44412e0}, {0x436cf80, 0x436cfd0},
