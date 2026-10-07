@@ -774,7 +774,9 @@ struct Launcher {
     static constexpr int kWidth = 620, kHeight = kButtonsTop + 48;
     static constexpr int kColumnLeft[] = {44, 360}, kColumnWidth[] = {276, kWidth - 44 - kColumnLeft[1]};
     static constexpr int kCheatsHeaderId = 109, kQualityHeaderId = 110;
-    struct Placed { HWND control; RECT bounds; HFONT* face; };
+    // Added to the width a checkbox reports for its label so rounding never clips the last character.
+    static constexpr int kCheckboxPadding = 4;
+    struct Placed { HWND control; RECT bounds; HFONT* face; bool checkbox = false; };
     HWND window = nullptr;
     HWND mode = nullptr;
     HWND resolution = nullptr;
@@ -849,6 +851,13 @@ struct Launcher {
     }
     // Because of the cap the size is not proportional to the DPI, so Windows is told the size the window will get on the new monitor.
     SIZE ScaledSize(UINT dpi, const RECT& work) const { return WindowSize(dpi, LayoutDpi(dpi, work)); }
+    // A checkbox is laid out as wide as its column, so clicks and the focus rectangle would reach far past its label. The button
+    // reports what its indicator, gap and label need in the font it was just given; the column width stays the limit.
+    static int LabelWidth(HWND box, int columnWidth, int padding) {
+        SIZE ideal{};
+        if (!SendMessageW(box, BCM_GETIDEALSIZE, 0, reinterpret_cast<LPARAM>(&ideal)) || ideal.cx <= 0) return columnWidth;
+        return min(columnWidth, static_cast<int>(ideal.cx) + padding);
+    }
     // Fonts, controls and the client area use the capped layout DPI; edges are scaled rather than sizes, so edges that line up at 100% still do.
     void Layout(UINT dpi, const RECT* suggested) {
         const RECT work = WorkArea(suggested != nullptr ? MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST) : MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY));
@@ -863,7 +872,9 @@ struct Launcher {
             SendMessageW(item.control, WM_SETFONT, reinterpret_cast<WPARAM>(*item.face), FALSE);
             RECT b = item.bounds;
             OffsetRect(&b, 0, Shift(b.top));
-            MoveWindow(item.control, scale(b.left), scale(b.top), scale(b.right) - scale(b.left), scale(b.bottom) - scale(b.top), FALSE);
+            int width = scale(b.right) - scale(b.left);
+            if (item.checkbox) width = LabelWidth(item.control, width, scale(kCheckboxPadding));
+            MoveWindow(item.control, scale(b.left), scale(b.top), width, scale(b.bottom) - scale(b.top), FALSE);
         }
         if (oldFont != nullptr) DeleteObject(oldFont);
         if (oldHeading != nullptr) DeleteObject(oldHeading);
@@ -1004,6 +1015,12 @@ struct Launcher {
             placed.push_back(Placed{handle, RECT{x, y, x + w, y + h}, &face});
             return handle;
         };
+        // w is the column the checkbox sits in; Layout narrows the control to its label so only the box and the text are clickable.
+        auto checkBox = [&](const wchar_t* text, int x, int y, int w, int id) {
+            HWND handle = control(L"BUTTON", text, BS_AUTOCHECKBOX | WS_TABSTOP, x, y, w, 28, id, font);
+            placed.back().checkbox = true;
+            return handle;
+        };
         control(L"STATIC", L"God of War: Sons of Sparta", 0, 24, 16, kWidth - 48, 34, 0, heading);
         control(L"BUTTON", L"Display", BS_GROUPBOX, 24, 62, kWidth - 48, 198, 0, font);
         control(L"STATIC", L"Display mode", SS_CENTERIMAGE, 44, 92, 104, 28, 0, font);
@@ -1017,8 +1034,8 @@ struct Launcher {
         qualityHeader = control(L"BUTTON", nullptr, BS_PUSHBUTTON | WS_TABSTOP, 24, kQualityTop - kHeaderOffset, 140, 30, kQualityHeaderId, font);
         const size_t firstQuality = placed.size();
         control(L"BUTTON", nullptr, BS_GROUPBOX | WS_CLIPSIBLINGS, 24, kQualityTop, kWidth - 48, kQualityHeight, 0, font);
-        skip = control(L"BUTTON", L"Skip intro", BS_AUTOCHECKBOX | WS_TABSTOP, 44, kQualityTop + 30, kWidth - 88, 28, 102, font);
-        skipDialogueBox = control(L"BUTTON", L"Skip dialogue", BS_AUTOCHECKBOX | WS_TABSTOP, 44, kQualityTop + 30 + 32, kWidth - 88, 28, 111, font);
+        skip = checkBox(L"Skip intro", 44, kQualityTop + 30, kWidth - 88, 102);
+        skipDialogueBox = checkBox(L"Skip dialogue", 44, kQualityTop + 30 + 32, kWidth - 88, 111);
         // The line break keeps both lines inside the indented box at every scale.
         control(L"STATIC", L"Press A (Xbox), Cross (PlayStation),\nEnter or Space to skip the current line.", 0, 64, kQualityTop + 30 + 32 + 28 + 2,
                 kWidth - 108, 48, 0, font);
@@ -1029,7 +1046,7 @@ struct Launcher {
         auto rowTop = [](int row) { return kCheatsTop + 30 + 32 * row; };
         for (size_t i = 0; i < kCheatCount; ++i) {
             const Cheat& cheat = kCheats[i];
-            cheatBoxes[i] = control(L"BUTTON", cheat.label, BS_AUTOCHECKBOX | WS_TABSTOP, kColumnLeft[cheat.column], rowTop(cheat.row), kColumnWidth[cheat.column], 28, cheat.id, font);
+            cheatBoxes[i] = checkBox(cheat.label, kColumnLeft[cheat.column], rowTop(cheat.row), kColumnWidth[cheat.column], cheat.id);
             SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
             for (size_t j = 0; j < kMultiplierCount; ++j) {
                 const Multiplier& multiplier = kMultipliers[j];
