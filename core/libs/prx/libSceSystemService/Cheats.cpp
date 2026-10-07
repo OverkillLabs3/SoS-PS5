@@ -358,19 +358,16 @@ bool WordEndsWith(const char* word, std::size_t length, const char* suffix) {
     return length >= size && _strnicmp(word + length - size, suffix, size) == 0;
 }
 
-// Gate: identifies gate object families, including the colliders under a gate.
 bool GateWord(const char* word, std::size_t length) { return WordIs(word, length, "gate") || WordIs(word, length, "gates"); }
 
-// Barrier: identifies explicit gameplay barrier object families.
 bool BarrierWord(const char* word, std::size_t length) { return WordIs(word, length, "barrier") || WordIs(word, length, "barriers"); }
 
-// Block: identifies gameplay blockers such as temporary progression barriers.
 bool BlockWord(const char* word, std::size_t length) {
     return WordIs(word, length, "block") || WordIs(word, length, "blocks") || WordIs(word, length, "blocking") ||
            WordEndsWith(word, length, "blocker") || WordEndsWith(word, length, "blockers");
 }
 
-// Collider: identifies objects explicitly named as colliders, which Collision geometry never is.
+// Collision geometry is never named Collider, so this word names a barrier even on an object that holds nothing else.
 bool ColliderWord(const char* word, std::size_t length) { return WordIs(word, length, "collider") || WordIs(word, length, "colliders"); }
 
 bool PluralWord(const char* word, std::size_t length) {
