@@ -10,34 +10,25 @@
 
 namespace {
 
-// Reveal full map (SOS_REVEAL_FULL_MAP=1), patched into Il2cppUserAssemblies when this library loads. Offsets are module RVAs.
-//
-// Three rewrites and one hook, each presentation-only because of a game invariant:
-//  - MapCell.IsVisible is read only to decide whether the hiddenTilemap covers the cell, so a null cover tile uncovers the map while
-//    discovery, RevealedMapCoordinates and the saved map data keep their real values.
-//  - A Region Report row takes its name and counts from ObjectiveProgressData and its percentage from MapZoneItem, so the row's
-//    discovered state decides nothing but which of its three presentation states is shown.
-//  - Every authored map marker the game hides for exploration reasons is gated by BooleanEvaluator_HasDiscoveredWorldPosition, which
-//    the shipped data uses nowhere else, so granting it places the marker and nothing else.
-//  - Campsite and temple markers do not exist until MapFastTravelMarkerManager.AddFastTravelPoint creates them from an unlocked
-//    FastTravelData.FlagData. The hook places the game's own prefab for the locked ones and never gives it a FastTravelData, which
-//    Select, GetFastTravelMapMarker and the travel-method toggle all require before they will act on a marker.
+// Reveal full map (SOS_REVEAL_FULL_MAP=1), patched into Il2cppUserAssemblies when this library loads. Offsets are module RVAs. Each patch
+// only changes what is shown, because what it changes decides nothing else: the fog's cover tile, a Region Report row's discovered state,
+// and HasDiscoveredWorldPosition, which only map markers use. The markers added for locked fast travel points have no FastTravelData,
+// which every travel action requires.
 
 std::uint8_t* game = nullptr;
 bool revealMarkers = false;
 
-constexpr std::uint32_t kHiddenTileLoad = 0xa9ec81;   // in MapSystem.MapTilemap.SetHiddenTileInHiddenTilemap
-constexpr std::uint32_t kMapAltarCall = 0xab2090;     // in ObjectiveProgressItem.<UpdateProgressData>g__IsObjectiveDiscovered
-constexpr std::uint32_t kMarkerDiscovery = 0xc1a5b4;  // in BooleanEvaluators.BooleanEvaluator_HasDiscoveredWorldPosition.EvaluateFilter
-constexpr std::uint32_t kMapOpened = 0x984160;        // MenuSystem.MapMenu.OnAfterOpen
+constexpr std::uint32_t kHiddenTileLoad = 0xa9ec81;
+constexpr std::uint32_t kMapAltarCall = 0xab2090;
+constexpr std::uint32_t kMarkerDiscovery = 0xc1a5b4;
+constexpr std::uint32_t kMapOpened = 0x984160;
 
-// mov rdx, qword ptr [r14 + 0x58], the hiddenTile field read, replaced by a null tile. The xor's flags are dead: the next instruction
-// loads the icall pointer and the branch after it tests that pointer.
+// mov rdx, qword ptr [r14 + 0x58], the hiddenTile read, replaced by a null tile. The xor's flags are dead: the branch after the next
+// instruction tests the pointer that instruction loads.
 constexpr std::uint8_t kHiddenTileBytes[] = {0x49, 0x8b, 0x56, 0x58};
 constexpr std::uint8_t kNullTileBytes[] = {0x31, 0xd2, 0x66, 0x90};  // xor edx, edx; nop
 
-// call g__HasUnlockedMapAltar, whose only caller this is, replaced by its true result. mov and nop leave the flags for the test al, al
-// that follows, and rbx, which the method reads next, is untouched.
+// call g__HasUnlockedMapAltar, whose only caller this is, replaced by its true result; the test al, al that follows sets the flags.
 constexpr std::uint8_t kMapAltarBytes[] = {0xe8, 0x5b, 0x00, 0x00, 0x00};
 constexpr std::uint8_t kUnlockedBytes[] = {0xb0, 0x01, 0x0f, 0x1f, 0x00};  // mov al, 1; nop dword ptr [rax]
 
@@ -50,17 +41,17 @@ struct Vector2Int { std::int32_t x, y; };
 struct Vector3 { float x, y, z; };
 
 // Game methods the hook calls. Every one takes a trailing MethodInfo* that these call sites leave null, as the game's own do.
-constexpr std::uint32_t kDestroy = 0x4379de0;             // UnityEngine.Object.Destroy
-constexpr std::uint32_t kPlaceTempleMarker = 0x694940;    // MapMarkerManager.PlaceFastTravelTempleMarkerAt
-constexpr std::uint32_t kPlaceSavePointMarker = 0x694a30;  // MapMarkerManager.PlaceFastTravelSavePointMarkerAt
-constexpr std::uint32_t kRemoveFromTile = 0x696ad0;       // MapMarkerTileAddressHandler.RemoveMarkerFromTileAddress
-constexpr std::uint32_t kRemoveFromCategory = 0x696c60;   // MapMarkerManager.RemoveMarkerFromCategoryCollection
-constexpr std::uint32_t kPlayerObject = 0x6c8190;         // MenuUtilities.GetPlayer1GameObjectForUI
-constexpr std::uint32_t kFlagsState = 0x8c06d0;           // RuntimeData.PlayerRuntimeDataUtils.TryGetFlagsState
-constexpr std::uint32_t kHasFlagTrue = 0x8c5c10;          // PersistentData.PlayerFlagsState.HasFlagTrue
-constexpr std::uint32_t kHasMap = 0x981aa0;               // MenuSystem.MapMenu.get_HasMap
-constexpr std::uint32_t kTravelPosition = 0xa8d700;       // MapSystem.MapFastTravelMarkerManager.GetFastTravelPosition
-constexpr std::uint32_t kFlagId = 0xb690c0;               // DataConfigs.FlagData.get_flagID, which is the asset name
+constexpr std::uint32_t kDestroy = 0x4379de0;
+constexpr std::uint32_t kPlaceTempleMarker = 0x694940;
+constexpr std::uint32_t kPlaceSavePointMarker = 0x694a30;
+constexpr std::uint32_t kRemoveFromTile = 0x696ad0;
+constexpr std::uint32_t kRemoveFromCategory = 0x696c60;
+constexpr std::uint32_t kPlayerObject = 0x6c8190;
+constexpr std::uint32_t kFlagsState = 0x8c06d0;
+constexpr std::uint32_t kHasFlagTrue = 0x8c5c10;
+constexpr std::uint32_t kHasMap = 0x981aa0;
+constexpr std::uint32_t kTravelPosition = 0xa8d700;
+constexpr std::uint32_t kFlagId = 0xb690c0;
 
 constexpr std::size_t kMenuMarkerManager = 0x140, kMenuTravelManager = 0x150;
 constexpr std::size_t kMarkerManagerTileHandler = 0x20, kMarkerManagerTravelHandler = 0x28;
@@ -70,7 +61,7 @@ constexpr std::size_t kTravelHandlerMarkers = 0x10;
 constexpr std::size_t kTravelDataFlag = 0x30, kTravelDataDestination = 0x48;
 constexpr std::size_t kMarkerCoordinate = 0x24, kMarkerTravelData = 0xa8;
 constexpr std::size_t kListItems = 0x10, kListSize = 0x18, kArrayLength = 0x18, kArrayData = 0x20;
-constexpr std::int32_t kTempleDestination = 0;  // MapSystem.FastTravel.FastTravelDestinationType.Temple
+constexpr std::int32_t kTempleDestination = 0;
 
 using GetObject = void*(APS5_VABI*)(void* instance, const void* method);
 using GetStatic = void*(APS5_VABI*)(const void* method);
@@ -127,7 +118,7 @@ void ShowLockedPoint(void* markerManager, void* travelManager, void* travelData)
     visuals[visualCount++] = Visual{travelData, object, TrackedVisualMarker(markerManager)};
 }
 
-// The game's own removal, as it deletes a custom marker: unregister from the tile address and category collections, then destroy.
+// The game's own removal of a custom marker: unregister from the tile address and category collections, then destroy.
 void HideVisualPoint(void* markerManager, Visual& entry) {
     if (entry.marker == nullptr) return;  // nothing to unregister with, so the marker is left where it is rather than dangling
     void* const tileHandler = Read<void*>(markerManager, kMarkerManagerTileHandler);
@@ -194,9 +185,8 @@ struct Range {
     std::uint32_t begin, end;
 };
 
-// FNV-1a of each patched instruction with the control flow around it, and of the two methods the hook calls and the one whose refusal of a
-// marker without FastTravelData keeps those markers out of fast travel. Only what the feature depends on is hashed, so unrelated code
-// cannot make the whole feature unavailable.
+// FNV-1a of only what the feature depends on: each patched instruction with the control flow around it, the methods the hook calls, and
+// Select, whose refusal of a marker without FastTravelData keeps those markers out of fast travel.
 constexpr Range kCode[] = {
     {kPlaceTempleMarker, 0x694b20},  // PlaceFastTravelTempleMarkerAt and PlaceFastTravelSavePointMarkerAt
     {kMapOpened, 0x984180},          // the prologue the hook replaces and copies

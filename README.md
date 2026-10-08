@@ -44,7 +44,9 @@ Any XInput/DualSense/DualShock gamepad works. Keyboard, mouse and gamepad can be
 
 F11 toggles fullscreen. The middle mouse button turns mouse-aim mode on or off (the mouse is captured and drives the right stick).
 
-**Enable cheats** in the launcher turns the runtime cheat system on. It is off by default, and it is read when the game starts: to use cheats, tick it in the launcher and start the game again. When it is on, F1-F9 turn the cheats on and off, and every cheat starts off each time the game starts. F10 opens and closes the In-Game Cheat Menu on the right side of the screen, which is mouse and keyboard usable. Closing the menu with its X button or F10 does not turn any active cheat off. While the menu is open the game receives no controller, keyboard or mouse input. Its Show FPS option turns the frame rate shown at the top left on or off. When the option is off, F1-F10 do nothing and the menu does not appear. F11 always toggles Borderless Fullscreen, and F12 is unused.
+**Enable cheats** in the launcher turns the runtime cheat system on. It is off by default, and it is read when the game starts: to use cheats, tick it in the launcher and start the game again. When it is on, F1-F9 turn the cheats on and off, and every cheat starts off each time the game starts. F10 opens and closes the In-Game Cheat Menu on the right side of the screen, which is mouse and keyboard usable. Closing the menu with its X button or F10 does not turn any active cheat off. While the menu is open the game receives no controller, keyboard or mouse input. When the option is off, F1-F10 do nothing and the menu does not appear. F11 always toggles Borderless Fullscreen, and F12 is unused.
+
+**Show in-game FPS** is a launcher Quality of Life option. It is off by default and draws the frame rate in the top-left corner of the game. It does not block any input, and it works with or without Enable cheats. The frame rate in the window title bar is separate and always shown.
 
 ## Display settings
 The window that opens when you start `SonsOfSparta-PS5.exe` has two display settings. Press Play to save them; they are kept for later starts.

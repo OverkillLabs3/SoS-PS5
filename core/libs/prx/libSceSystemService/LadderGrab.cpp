@@ -10,43 +10,41 @@
 
 namespace {
 
-// Grab ladders with Up (SOS_LADDER_GRAB_WITH_UP=1). The game's climbable mount transitions choose between an interact press and pointing
-// the stick up with BooleanEvaluator_SelectEvaluatorByBool on the Traversal Inputs setting; this accepts the stick-up branch where the game
-// refused it, and the climbable the transition then looks for is narrowed to ladders. Ropes, Down and everything else about the transition,
-// including where the player must stand, stay with the game. Patched into Il2cppUserAssemblies when this library loads; offsets are module
-// RVAs.
+// Grab ladders with Up (SOS_LADDER_GRAB_WITH_UP=1), patched into Il2cppUserAssemblies when this library loads; offsets are module RVAs.
+// Where a climbable mount transition refuses the stick pointing up (BooleanEvaluator_SelectEvaluatorByBool on the Traversal Inputs
+// setting), Up is accepted for ladders only. Ropes, Down and where the player must stand stay with the game.
 
 std::uint8_t* game = nullptr;
 
-constexpr std::uint32_t kCheckCircle = 0x88f140;            // PropScripts.ClimbableVolume.CheckCircleForClimbableVolume
-constexpr std::uint32_t kPassesFilter = 0xc142d0;           // BooleanEvaluator.PassesFilter, which applies the evaluator's negate
-constexpr std::uint32_t kClimbableAheadCall = 0xc1cceb;     // the CheckCircleForClimbableVolume call in InFrontOfClimbableVolume
-constexpr std::uint32_t kIntComparisonEvaluate = 0xc1f340;  // slot 4 of BooleanEvaluator_IntComparison
-constexpr std::uint32_t kGeneralSettingValue = 0xb5fee0;    // slot 4 of DynamicInt_GeneralSetting
-constexpr std::uint32_t kSelectEvaluate = 0xc28b00;         // BooleanEvaluator_SelectEvaluatorByBool.EvaluateFilter
-constexpr std::uint32_t kCheckInputs = 0xc28d40;            // slot 5 of BooleanEvaluator_SimpleInputCheck
+constexpr std::uint32_t kCheckCircle = 0x88f140;
+constexpr std::uint32_t kPassesFilter = 0xc142d0;  // BooleanEvaluator.PassesFilter, which applies the evaluator's negate
+constexpr std::uint32_t kClimbableAheadCall = 0xc1cceb;
+constexpr std::uint32_t kIntComparisonEvaluate = 0xc1f340;
+constexpr std::uint32_t kGeneralSettingValue = 0xb5fee0;
+constexpr std::uint32_t kSelectEvaluate = 0xc28b00;
+constexpr std::uint32_t kCheckInputs = 0xc28d40;
 
 // Il2CppClass vtable: the method pointer of slot n is at 0x138 + 16n.
 constexpr std::size_t kSlot4 = 0x178, kSlot5 = 0x188;
-constexpr std::size_t kCondition = 0x18, kButtonBranch = 0x20, kStickBranch = 0x28;  // SelectEvaluatorByBool.boolean, .ifTrue, .ifFalse
-constexpr std::size_t kComparedValue = 0x18;                                        // BooleanEvaluator_IntComparison.intA
-constexpr std::size_t kSetting = 0x10;                                              // DynamicInt_GeneralSetting.setting
-constexpr std::size_t kInputRules = 0x18;                                           // SimpleInputCheck.inputCheckRules
+constexpr std::size_t kCondition = 0x18, kButtonBranch = 0x20, kStickBranch = 0x28;
+constexpr std::size_t kComparedValue = 0x18;
+constexpr std::size_t kSetting = 0x10;
+constexpr std::size_t kInputRules = 0x18;
 constexpr std::size_t kListItems = 0x10, kListSize = 0x18, kArrayData = 0x20;
-constexpr std::size_t kRuleCategory = 0x10, kRuleMinUp = 0x20;  // InputCheckRule.checkCategory, .minMoveInputThreshold.y
-constexpr std::size_t kClimbableType = 0x28;                    // PropScripts.ClimbableVolume.climbableType
+constexpr std::size_t kRuleCategory = 0x10, kRuleMinUp = 0x20;
+constexpr std::size_t kClimbableType = 0x28;
 
-constexpr std::int32_t kTraversalInputs = 79;    // Settings.GeneralIntSettings.TraversalInputs
-constexpr std::int32_t kMovementThreshold = 1;   // InputCheckCategory.inputMovementThreshold
-constexpr std::int32_t kLadder = 1;              // ClimbableVolumeType.ladder
+constexpr std::int32_t kTraversalInputs = 79;
+constexpr std::int32_t kMovementThreshold = 1;
+constexpr std::int32_t kLadder = 1;
 
 struct Vector2 { float x, y; };
 using Evaluate = bool(APS5_VABI*)(void* evaluator, void* argument, const void* method);
 using CheckCircle = void*(APS5_VABI*)(Vector2 position, float radius, const void* method);
 
-// Set when the selector below accepted Up where the game would have refused, and taken by the climbable lookup of the very next condition
-// of the same transition: Boolean_LOGICAL_AND_Multi evaluates its conditions in order and stops at the first that fails, and in both mount
-// transitions the climbable check is the condition right after the input selector. Both run on the game thread.
+// Set when the selector accepted Up where the game would have refused, and taken by the climbable lookup of the next condition of the same
+// transition: Boolean_LOGICAL_AND_Multi evaluates in order and stops at the first failure, and in both mount transitions the climbable check
+// comes right after the input selector. Both run on the game thread.
 bool grantedUp = false;
 
 template <typename T> T& Field(void* object, std::size_t offset) { return *reinterpret_cast<T*>(static_cast<std::uint8_t*>(object) + offset); }
@@ -93,8 +91,8 @@ bool APS5_VABI GrabsWithUp(void* select, void* argument) {
     return true;
 }
 
-// Replaces the climbable lookup of BooleanEvaluator_InFrontOfClimbableVolume. A mount granted to Up sees ladders only; every other
-// evaluation, and so every rope, gets the game's own result. Returning null is what the evaluator reads as nothing to climb.
+// Replaces the climbable lookup of BooleanEvaluator_InFrontOfClimbableVolume: a mount granted to Up sees ladders only, and null reads as
+// nothing to climb. Every other evaluation, and so every rope, gets the game's own result.
 void* APS5_VABI ClimbableAhead(Vector2 position, float radius, const void* method) {
     void* const volume = Game<CheckCircle>(kCheckCircle)(position, radius, method);
     if (!grantedUp) return volume;
@@ -126,8 +124,7 @@ constexpr std::uint8_t kClimbableAheadCallBytes[] = {0xe8, 0x50, 0x24, 0xc7, 0xf
 
 struct Range { std::uint32_t begin, end; };
 
-// FNV-1a of the code the offsets, vtable slots and the order the conditions are evaluated in were read from, so the patch only applies to
-// the analysed game build.
+// FNV-1a of the code the offsets, vtable slots and condition order were read from, so only the analysed game build is patched.
 constexpr Range kCode[] = {
     {kCheckCircle, 0x88f470},
     {kGeneralSettingValue, 0xb5ff40},

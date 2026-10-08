@@ -483,7 +483,6 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
             padInput.SetGameInputBlocked(menuInputBlocked);
             keyboardInput.Reset();
             mouseInput.Reset();
-            std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] game input %s\n", menuInputBlocked ? "blocked" : "restored");
         };
         while (!token.stop_requested()) {
             {

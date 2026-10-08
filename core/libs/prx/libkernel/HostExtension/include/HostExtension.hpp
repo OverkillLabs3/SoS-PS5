@@ -8,12 +8,15 @@
 using HostKeyHandler = void (*)(int scancode);
 using HostFrameTick = void (*)();
 
+// Pending: off, with its patch kept until the game no longer needs it. Failed: a patch behind the control could not be restored. Either
+// is neither on nor off, so the control shows the word instead of its value.
+enum class HostControlState { Normal, Pending, Failed };
+
 // Immediate-mode widgets the host provides to a menu. They are only valid during the draw call they are passed to.
 struct HostMenuWidgets {
     void (*heading)(const char* text);
     void (*separator)();
-    // failed: a patch behind the control could not be restored, so it is neither on nor off and shows FAILED.
-    bool (*checkbox)(const char* label, bool* value, bool enabled, bool failed);
+    bool (*checkbox)(const char* label, bool* value, bool enabled, HostControlState state);
     bool (*combo)(const char* label, int* index, const char* const* items, int count, bool enabled, bool failed);
     bool (*statusButton)(const char* label, const char* status, bool enabled, bool failed);
 };

@@ -96,6 +96,12 @@ bool ReadRevealFullMap(const std::wstring& directory) {
     return wcscmp(value, L"1") == 0;
 }
 
+bool ReadShowInGameFps(const std::wstring& directory) {
+    wchar_t value[8] = {};
+    GetPrivateProfileStringW(L"QualityOfLife", L"show_in_game_fps", L"0", value, 8, (directory + kLauncherIni).c_str());
+    return wcscmp(value, L"1") == 0;
+}
+
 // The profile API adds a new section right below the last line. After Play has saved, every section header but the first is
 // preceded by exactly one blank line and trailing blank lines are dropped; other lines stay as they are. A UTF-16 file is left alone.
 void SeparateIniSections(const std::wstring& path) {
@@ -744,7 +750,7 @@ struct Launcher {
     static constexpr int kWorkAreaMargin = 24;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors. The Quality of Life section includes the two-line Skip dialogue hint.
-    static constexpr int kQualityTop = 272, kQualityRows = 4, kSkipDialogueHint = 50;
+    static constexpr int kQualityTop = 272, kQualityRows = 5, kSkipDialogueHint = 50;
     static constexpr int kQualityHeight = 70 + 32 * (kQualityRows - 1) + kSkipDialogueHint;
     static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 96, kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 620, kHeight = kButtonsTop + 48;
@@ -758,6 +764,7 @@ struct Launcher {
     HWND skipDialogueBox = nullptr;
     HWND ladderGrabBox = nullptr;
     HWND revealFullMapBox = nullptr;
+    HWND showInGameFpsBox = nullptr;
     HFONT font = nullptr, heading = nullptr;
     std::vector<Placed> placed;
     int chosen = -1;
@@ -766,6 +773,7 @@ struct Launcher {
     bool skipDialogue = false;
     bool ladderGrabWithUp = false;
     bool revealFullMap = false;
+    bool showInGameFps = false;
     bool cheatsEnabled = false;
     bool play = false;
     HWND cheatsBox = nullptr;
@@ -876,6 +884,7 @@ struct Launcher {
             self->skipDialogue = SendMessageW(self->skipDialogueBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->ladderGrabWithUp = SendMessageW(self->ladderGrabBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->revealFullMap = SendMessageW(self->revealFullMapBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            self->showInGameFps = SendMessageW(self->showInGameFpsBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
             self->cheatsEnabled = SendMessageW(self->cheatsBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             DestroyWindow(hwnd);
@@ -895,6 +904,7 @@ struct Launcher {
         skipDialogue = ReadSkipDialogue(directory);
         ladderGrabWithUp = ReadLadderGrabWithUp(directory);
         revealFullMap = ReadRevealFullMap(directory);
+        showInGameFps = ReadShowInGameFps(directory);
         cheatsEnabled = ReadCheatsEnabled(directory);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
@@ -950,13 +960,14 @@ struct Launcher {
         control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
         control(L"BUTTON", L"Quality of Life", BS_GROUPBOX, 24, kQualityTop, kWidth - 48, kQualityHeight, 0, font);
-        skip = checkBox(L"Skip intro", 44, kQualityTop + 30, kWidth - 88, 102);
-        skipDialogueBox = checkBox(L"Skip dialogue", 44, kQualityTop + 30 + 32, kWidth - 88, 111);
+        showInGameFpsBox = checkBox(L"Show in-game FPS", 44, kQualityTop + 30, kWidth - 88, 113);
+        skip = checkBox(L"Skip intro", 44, kQualityTop + 30 + 32, kWidth - 88, 102);
+        skipDialogueBox = checkBox(L"Skip dialogue", 44, kQualityTop + 30 + 32 * 2, kWidth - 88, 111);
         // The line break keeps both lines inside the indented box at every scale.
-        control(L"STATIC", L"Press A (Xbox), Cross (PlayStation),\nEnter or Space to skip the current line.", 0, 64, kQualityTop + 30 + 32 + 28 + 2,
+        control(L"STATIC", L"Press A (Xbox), Cross (PlayStation),\nEnter or Space to skip the current line.", 0, 64, kQualityTop + 30 + 32 * 2 + 28 + 2,
                 kWidth - 108, 48, 0, font);
-        ladderGrabBox = checkBox(L"Grab ladders with Up", 44, kQualityTop + 30 + 32 * 2 + kSkipDialogueHint, kWidth - 88, 114);
-        revealFullMapBox = checkBox(L"Reveal full Map", 44, kQualityTop + 30 + 32 * 3 + kSkipDialogueHint, kWidth - 88, 115);
+        ladderGrabBox = checkBox(L"Grab ladders with Up", 44, kQualityTop + 30 + 32 * 3 + kSkipDialogueHint, kWidth - 88, 114);
+        revealFullMapBox = checkBox(L"Reveal full Map", 44, kQualityTop + 30 + 32 * 4 + kSkipDialogueHint, kWidth - 88, 115);
         control(L"BUTTON", L"Cheats", BS_GROUPBOX, 24, kCheatsTop, kWidth - 48, kCheatsHeight, 0, font);
         cheatsBox = checkBox(L"Enable cheats", 44, kCheatsTop + 30, kWidth - 88, 116);
         control(L"STATIC", L"Press F10 in game to open the cheat menu", 0, 64, kCheatsTop + 30 + 28 + 2, kWidth - 108, 24, 0, font);
@@ -970,6 +981,7 @@ struct Launcher {
         SendMessageW(skipDialogueBox, BM_SETCHECK, skipDialogue ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(ladderGrabBox, BM_SETCHECK, ladderGrabWithUp ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(revealFullMapBox, BM_SETCHECK, revealFullMap ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(showInGameFpsBox, BM_SETCHECK, showInGameFps ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(cheatsBox, BM_SETCHECK, cheatsEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
 
         const int fromFile = ReadResolutionFile(directory);
@@ -1028,6 +1040,9 @@ struct Launcher {
         }
         if (play && revealFullMap != ReadRevealFullMap(directory) && !saveIni(L"QualityOfLife", L"RevealFullMap", revealFullMap ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Reveal full Map setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
+        }
+        if (play && showInGameFps != ReadShowInGameFps(directory) && !saveIni(L"QualityOfLife", L"show_in_game_fps", showInGameFps ? L"1" : L"0")) {
+            MessageBoxW(nullptr, L"The Show in-game FPS setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
         if (play) {
             if (cheatsEnabled != ReadCheatsEnabled(directory) && !saveIni(L"Cheats", L"enable_cheats", cheatsEnabled ? L"1" : L"0")) {
@@ -1116,6 +1131,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     bool skipDialogue = false;
     bool ladderGrabWithUp = false;
     bool revealFullMap = false;
+    bool showInGameFps = false;
     bool cheatsEnabled = false;
     {
         Launcher launcher;
@@ -1125,6 +1141,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         skipDialogue = launcher.skipDialogue;
         ladderGrabWithUp = launcher.ladderGrabWithUp;
         revealFullMap = launcher.revealFullMap;
+        showInGameFps = launcher.showInGameFps;
         cheatsEnabled = launcher.cheatsEnabled;
     }
 
@@ -1206,6 +1223,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     SetEnvironmentVariableW(L"SOS_SKIP_DIALOGUE", skipDialogue ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_LADDER_GRAB_WITH_UP", ladderGrabWithUp ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_REVEAL_FULL_MAP", revealFullMap ? L"1" : nullptr);
+    SetEnvironmentVariableW(L"SOS_SHOW_IN_GAME_FPS", showInGameFps ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_CHEATS_ENABLED", cheatsEnabled ? L"1" : nullptr);
     for (const wchar_t* variable : kLegacyCheatVariables) SetEnvironmentVariableW(variable, nullptr);
     PROCESS_INFORMATION process{};

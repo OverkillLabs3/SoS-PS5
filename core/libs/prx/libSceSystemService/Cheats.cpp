@@ -34,6 +34,7 @@ struct Cheat {
     std::atomic<bool> active{false};
     bool available = false;  // its game code is recognised and its patches are built
     bool failed = false;     // it is off but its patch is still in the game
+    bool pending = false;    // it is off and its patch is kept until the game no longer needs it
 };
 std::atomic<int> damageFactor{1}, jumpFactor{1};
 Cheat godMode{"God Mode"};
@@ -105,22 +106,22 @@ constexpr std::uint32_t kInputDeltaCall = 0x7067a9;     // in PlayerMovement.Tic
 constexpr std::uint32_t kSlopeAligned = 0x6ecf20;
 constexpr std::uint32_t kJumpDirectionCall = 0x6fc9c7;  // in MoveStateJump.<DelayStartJumping>d__27.MoveNext
 constexpr std::uint32_t kJumpAngle = 0x6face0;
-constexpr std::uint32_t kGateMoveCall = 0x706b02;        // in PlayerMovement.TickPseudoPhysics
+constexpr std::uint32_t kGateMoveCall = 0x706b02;
 constexpr std::uint32_t kMovePosition = 0x6edc60;
-constexpr std::uint32_t kBlockedAheadHitCall = 0xc30dc2;  // in BooleanEvaluator_CollisionBlockedAhead.EvaluateFilter
+constexpr std::uint32_t kBlockedAheadHitCall = 0xc30dc2;
 constexpr std::uint32_t kHitCollider = 0x443bb00;
 constexpr std::uint32_t kIgnoreCollision = 0x44273f0, kGetIgnoreCollision = 0x4427460, kGetBounds = 0x4441ab0;
 constexpr std::uint32_t kGetName = 0x4378a50, kIsTrigger = 0x4441290, kEnabled = 0x436cf80, kMyPosition2D = 0x6ef180;
 constexpr std::uint32_t kGameObjectOf = 0x436e240, kTransformOf = 0x436e1f0, kParentOf = 0x4384a10, kChildCount = 0x438a190, kChild = 0x438aa20;
 constexpr std::uint32_t kComponentCount = 0x43724d0, kComponentAt = 0x4372580, kInstanceId = 0x4378440, kGetLayer = 0x4372720;
 constexpr std::uint32_t kAttachedRigidbody = 0x443be00, kBodyType = 0x443d620;
-constexpr std::uint32_t kPhysicsLock = 0x6ebd10;  // CharacterMovement.SetPhysicsLockState(lockId, enable)
+constexpr std::uint32_t kPhysicsLock = 0x6ebd10;
 
 constexpr std::size_t kNativeObject = 0x10;  // UnityEngine.Object.m_CachedPtr, null once destroyed
-constexpr std::uint32_t kCoreEventsTypeInfo = 0x5e32be8;  // CoreGameEventsSubsystem's TypeInfo slot, unresolved (odd) until first use
-constexpr std::size_t kStaticFields = 0xb8;               // Il2CppClass.static_fields; CoreGameEventsSubsystem.Instance is the first
-constexpr std::size_t kPlayer1State = 0xf8;               // CoreGameEventsSubsystem.player1InstanceCached
-constexpr std::size_t kStatePawn = 0x10;                  // PlayerInstanceState.pawn
+constexpr std::uint32_t kCoreEventsTypeInfo = 0x5e32be8;
+constexpr std::size_t kStaticFields = 0xb8;  // Il2CppClass.static_fields; CoreGameEventsSubsystem.Instance is the first
+constexpr std::size_t kPlayer1State = 0xf8;
+constexpr std::size_t kStatePawn = 0x10;
 constexpr std::size_t kMaxHp = 0x38, kCurrentHp = 0x40, kGreyHp = 0x44;
 constexpr std::size_t kCurrentSpirit = 0x20, kMaxSpirit = 0x24;
 constexpr std::size_t kCurrentMana = 0x28, kMaxMana = 0x2c;
@@ -287,8 +288,7 @@ void* TransformOf(void* component) { return Alive(component) ? Game<ObjectGetter
 void* ParentOf(void* transform) { return Alive(transform) ? Game<ObjectGetter>(kParentOf)(transform, nullptr) : nullptr; }
 int InstanceId(void* object) { return Alive(object) ? Game<IntGetter>(kInstanceId)(object, nullptr) : 0; }
 
-// RaycastHit2D.collider looks m_Collider up with Object.FindObjectFromInstanceID and returns it only as a Collider2D: null for any other
-// object and once the collider is destroyed.
+// RaycastHit2D.collider resolves the instance ID: null once the collider is destroyed, and for anything that is not a Collider2D.
 void* ColliderById(int id) {
     alignas(8) std::uint8_t hit[kHitSize] = {};
     std::memcpy(hit + kHitColliderId, &id, sizeof(id));
@@ -305,8 +305,7 @@ int BodyOf(void* collider) {
     return Alive(body) ? Game<IntGetter>(kBodyType)(body, nullptr) : kNoBody;
 }
 
-// Calls visit(word, length) for each word of an object name: separators split it, as does a change from lower to upper case or between
-// letters and digits.
+// Words are split at separators, at lower-to-upper case changes and between letters and digits.
 template <typename Visit> void ForEachWord(const char* name, Visit&& visit) {
     std::size_t start = 0, length = 0;
     for (std::size_t i = 0;; ++i) {
@@ -360,7 +359,7 @@ struct NameSignal {
     int family = kNoPass;
     bool plural = false;       // Gates, Blocks, Colliders: a container of several barriers
     bool colliderOnly = true;  // no word but Collider / Colliders and numbers
-    bool excluded = false;     // Collision, drop-through, hazard, ground, wall, ceiling, floor, ramp or volume
+    bool excluded = false;
     bool dropthrough = false;
 };
 
@@ -397,8 +396,7 @@ struct PassDecision {
 bool KinematicRejected(int family, int body) { return (family == kBlockFamily || family == kColliderFamily) && body == kKinematicBody; }
 
 // Gate, barrier and block names count on the collider's object or on a singular ancestor; a collider name only on the object itself or on a
-// parent named nothing but Collider(s), because level geometry sits under containers such as Sparta_colliders. The root is the highest
-// object of the matching chain; key is its instance ID.
+// parent named nothing but Collider(s), because level geometry sits under containers such as Sparta_colliders.
 PassDecision Identify(void* collider, int id) {
     PassDecision decision{id};
     void* transforms[kPassDepth] = {};
@@ -434,8 +432,7 @@ PassDecision Identify(void* collider, int id) {
     return decision;
 }
 
-// What each collider was found to be in this scene, so a wall pressed against every frame is named once. Cleared at every world
-// transition, because instance IDs may name other objects in the next scene.
+// Per scene, so a wall pressed against every frame is named once; instance IDs may name other objects in the next scene.
 PassDecision decisions[kMaxPassDecisions];
 int nextDecision = 0;
 
@@ -480,6 +477,7 @@ struct GateCrossing {
     int awayTicks = 0;
 };
 GateCrossing crossing;
+std::atomic<bool> crossingOpen{false};  // set on the game thread, read on the window thread
 struct GateRequest {
     std::uintptr_t player = 0;
     int seed = 0;
@@ -494,7 +492,6 @@ bool CrossingMember(int id) {
     return false;
 }
 
-// Colliders beyond the limit stay solid.
 void AddMember(int id) {
     if (id != 0 && !CrossingMember(id) && crossing.memberCount < kMaxPassMembers) crossing.members[crossing.memberCount++] = id;
 }
@@ -509,7 +506,6 @@ void AddSolidColliders(void* transform, int family) {
     }
 }
 
-// The root's own colliders and those of its direct children, except children named as level geometry.
 void AddFamily(void* root, int family) {
     AddSolidColliders(root, family);
     const int children = Alive(root) ? Game<IntGetter>(kChildCount)(root, nullptr) : 0;
@@ -521,7 +517,6 @@ void AddFamily(void* root, int family) {
     }
 }
 
-// The live player colliders' X extent; the falling collider counts only while enabled.
 bool CrossingPlayerSpan(Span* span) {
     void* main = ColliderById(crossing.players[0]);
     if (!Alive(main)) return false;
@@ -531,7 +526,6 @@ bool CrossingPlayerSpan(Span* span) {
     return true;
 }
 
-// The X extent of the gate's live parts; returns how many parts are live.
 int FamilySpan(Span* family) {
     int live = 0;
     for (int m = 0; m < crossing.memberCount; ++m) {
@@ -544,7 +538,6 @@ int FamilySpan(Span* family) {
     return live;
 }
 
-// Sets every live player / gate pair of the crossing to ignored, or back to its state before the crossing.
 void SetPairs(bool ignore) {
     for (int p = 0; p < 2; ++p) {
         void* collider = ColliderById(crossing.players[p]);
@@ -555,7 +548,7 @@ void SetPairs(bool ignore) {
     }
 }
 
-// Ignored pairs of one player collider, or -1 without that collider.
+// -1 without that player collider.
 int IgnoredPairs(int p) {
     void* collider = ColliderById(crossing.players[p]);
     if (!Alive(collider)) return -1;
@@ -629,11 +622,13 @@ void BeginCrossing(void* movement, int seed, int direction, std::uint64_t now) {
         }
     }
     SetPairs(true);
+    crossingOpen.store(true);
 }
 
 void EndCrossing() {
     SetPairs(false);
     crossing = GateCrossing{};
+    crossingOpen.store(false);
 }
 
 void ContinueCrossing(void* movement, Vector2 delta, std::uint64_t now, bool on) {
@@ -767,8 +762,6 @@ const char* Give(const Award& award, void* controller, const char** item) {
     return nullptr;
 }
 
-// The hook that services an action is installed only while one is pending, so PlayerController.Update is the game's own empty method at
-// rest. Both are defined with the patch mechanism, below.
 const char* InstallWalletHook();
 void RemoveWalletHook();
 
@@ -788,8 +781,7 @@ __attribute__((noinline)) void RunWalletAction(void* controller) {
     }
 }
 
-// PlayerController.Update, on the game thread, for as long as one action is pending. The run is a separate function because a SysV
-// function here cannot have cleanups.
+// PlayerController.Update while an action is pending. The run is a separate function because a SysV function here cannot have cleanups.
 bool APS5_VABI ControllerFilter(void* controller, void*, void*, float*) {
     RunWalletAction(controller);
     return false;
@@ -813,9 +805,8 @@ bool ReadPointer(std::uintptr_t address, std::uintptr_t& value) {
     return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), &value, sizeof(value), nullptr) != FALSE;
 }
 
-// Player 1 the way the game's own menus find it: CoreGameEventsSubsystem.Instance.player1InstanceCached.pawn, alive. This runs on the
-// window thread, which may race the game releasing any of these objects, so each read goes through ReadProcessMemory, which fails instead
-// of faulting; a failed read is Unknown, not Absent.
+// CoreGameEventsSubsystem.Instance.player1InstanceCached.pawn, as the game's menus find it. The window thread may race the game releasing
+// these objects, so each read goes through ReadProcessMemory, which fails instead of faulting; a failed read is Unknown, not Absent.
 Presence Player1() {
     if (!playerLookupRecognised) return Presence::Unknown;
     std::uintptr_t value = 0;
@@ -828,13 +819,11 @@ Presence Player1() {
     return Presence::Present;
 }
 
-// The one availability rule for the item actions, shared by the menu buttons and the F7/F8 keys.
 bool AwardsAvailable() {
     return awardsUnavailable.load() == nullptr && walletAction.load() == kIdle && Player1() != Presence::Absent;
 }
 
-// F7 or F8: when AwardsAvailable allows it, queues its action and installs the hook that services it. The expiry also runs here because
-// OnFrame, which runs it otherwise, only runs while frames are presented.
+// The expiry also runs here because OnFrame only runs while frames are presented.
 void Request(Award& award) {
     const std::uint64_t now = NowMs();
     ExpireRequest(now);
@@ -895,17 +884,15 @@ constexpr std::uint8_t kManaClampBytes[] = {0xc5, 0xfa, 0x58, 0x43, 0x28, 0xc5, 
 // mov rdx, [rax + 0x180]; call [rax + 0x178]
 constexpr std::uint8_t kHitDamageCallBytes[] = {0x48, 0x8b, 0x78, 0x10, 0x48, 0x85, 0xff, 0x74, 0x14, 0x48, 0x8b, 0x07, 0x48, 0x8b, 0x73,
                                                 0x30, 0x48, 0x8b, 0x90, 0x80, 0x01, 0x00, 0x00, 0xff, 0x90, 0x78, 0x01, 0x00, 0x00};
-// vmovaps xmm0, [rbp - 0x20]; mov rdi, rbx; call MovePosition; vbroadcastss xmm0, [rbp - 0x50]; vmovaps xmm1, [rbp - 0x20]; vdivps;
-// vmovlps [rbx + 0xf8], xmm0, rewritten to load deltaTime into xmm1 instead and call GateMove
+// call MovePosition(delta), then lastFrameVelocityFromInverseDelta = delta / deltaTime, with delta at [rbp - 0x20] and deltaTime at [rbp - 0x50]
 constexpr std::uint8_t kGateMoveCallBytes[] = {0xc5, 0xf8, 0x28, 0x45, 0xe0, 0x48, 0x89, 0xdf, 0xe8, 0x51, 0x71, 0xfe, 0xff, 0xc4, 0xe2, 0x79, 0x18, 0x45,
                                                0xb0, 0xc5, 0xf8, 0x28, 0x4d, 0xe0, 0xc5, 0xf0, 0x5e, 0xc0, 0xc5, 0xf8, 0x13, 0x83, 0xf8, 0x00, 0x00, 0x00};
-// call RaycastHit2D.get_collider: only the call's target changes, so it is redirected through a jump near the module
+// call RaycastHit2D.get_collider
 constexpr std::uint8_t kBlockedAheadHitBytes[] = {0xe8, 0x39, 0xad, 0x80, 0x03};
 
 constexpr std::size_t kMaxPatch = 40;
 
-// One stretch of game code a cheat replaces. original and patched are built once, while the game code is recognised; nothing is written to
-// the game until the cheat is turned on, and turning it off puts original back.
+// One stretch of game code a cheat replaces. original and patched are built at startup; only a transition writes either to the game.
 struct Site {
     std::uint32_t rva;
     std::uint8_t size;
@@ -946,7 +933,7 @@ constexpr bool Valid() {
 static_assert(Valid(), "cheat patches must fit in a site and must not overlap");
 
 void GateMoveCall(std::uint8_t (&call)[sizeof(kGateMoveCallBytes)]) {
-    // vmovaps xmm0, [rbp - 0x20]; vmovss xmm1, [rbp - 0x50] (deltaTime); mov rdi, rbx; mov rax, GateMove; call rax; nops
+    // GateMove(rbx, delta in xmm0, deltaTime in xmm1), padded with nops
     constexpr std::uint8_t code[sizeof(kGateMoveCallBytes)] = {0xc5, 0xf8, 0x28, 0x45, 0xe0, 0xc5, 0xfa, 0x10, 0x4d, 0xb0, 0x48, 0x89, 0xdf, 0x48, 0xb8, 0, 0, 0,
                                                                0,    0,    0,    0,    0,    0xff, 0xd0, 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x1f, 0x40, 0x00};
     std::memcpy(call, code, sizeof(code));
@@ -963,11 +950,11 @@ using Observer = void(APS5_VABI*)(void* self, void* argument, std::uintptr_t arg
 // instructions run and the method continues after them, so those must be whole instructions with no rip-relative operand.
 constexpr std::uint8_t kObserveStart[] = {
     0x57, 0x56, 0x52, 0x51, 0x41, 0x50, 0x41, 0x51,                          // push rdi, rsi, rdx, rcx, r8, r9
-    0x48, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00,                                // sub rsp, 0x88
-    0xc5, 0xfa, 0x7f, 0x04, 0x24, 0xc5, 0xfa, 0x7f, 0x4c, 0x24, 0x10,        // vmovdqu [rsp], xmm0; [rsp + 0x10], xmm1
-    0xc5, 0xfa, 0x7f, 0x54, 0x24, 0x20, 0xc5, 0xfa, 0x7f, 0x5c, 0x24, 0x30,  // xmm2, xmm3
-    0xc5, 0xfa, 0x7f, 0x64, 0x24, 0x40, 0xc5, 0xfa, 0x7f, 0x6c, 0x24, 0x50,  // xmm4, xmm5
-    0xc5, 0xfa, 0x7f, 0x74, 0x24, 0x60, 0xc5, 0xfa, 0x7f, 0x7c, 0x24, 0x70,  // xmm6, xmm7
+    0x48, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00,                                // sub rsp, 0x88, which also aligns rsp for the call
+    0xc5, 0xfa, 0x7f, 0x04, 0x24, 0xc5, 0xfa, 0x7f, 0x4c, 0x24, 0x10,        // save xmm0..xmm7 with vmovdqu
+    0xc5, 0xfa, 0x7f, 0x54, 0x24, 0x20, 0xc5, 0xfa, 0x7f, 0x5c, 0x24, 0x30,
+    0xc5, 0xfa, 0x7f, 0x64, 0x24, 0x40, 0xc5, 0xfa, 0x7f, 0x6c, 0x24, 0x50,
+    0xc5, 0xfa, 0x7f, 0x74, 0x24, 0x60, 0xc5, 0xfa, 0x7f, 0x7c, 0x24, 0x70,
     0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,                                      // mov rax, observer (offset 64)
     0xff, 0xd0,                                                              // call rax
     0xc5, 0xfa, 0x6f, 0x04, 0x24, 0xc5, 0xfa, 0x6f, 0x4c, 0x24, 0x10,        // restore xmm0..xmm7
@@ -1047,7 +1034,10 @@ bool Stop(Stopped& stopped) {
     if (!room) return false;
     for (std::size_t i = 0; i < count; ++i) {
         const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, ids[i]);
-        if (thread == nullptr) continue;  // ended between the snapshot and here, so it is not in the code either
+        if (thread == nullptr) {
+            if (GetLastError() == ERROR_INVALID_PARAMETER) continue;  // the thread ended since the snapshot
+            return false;                                              // a live thread that cannot be stopped
+        }
         if (SuspendThread(thread) == static_cast<DWORD>(-1)) {
             CloseHandle(thread);
             return false;
@@ -1072,10 +1062,9 @@ bool Returns(std::uintptr_t address, Site* const sites[], std::size_t count) {
     return false;
 }
 
-// A thread stopped inside the bytes about to be replaced would resume in the middle of an instruction that no longer exists, and so would
-// one inside a replacement called from a rewritten site, because the call returns into the site at an offset that is not an instruction
-// boundary of the original sequence. Such a thread is found by the one return address it must hold, in the live stack above its stack
-// pointer; an entry hook returns through its trampoline instead, so there is nothing to look for.
+// A thread stopped inside the replaced bytes would resume mid-instruction, and so would one inside a replacement called from a rewritten
+// site, whose call returns into the site off the original instruction boundaries. Such a thread holds that one return address in its live
+// stack; an entry hook returns through its trampoline instead, so there is nothing to look for.
 bool Outside(const Stopped& stopped, Site* const sites[], std::size_t count) {
     bool returned = false;
     for (std::size_t s = 0; s < count; ++s) returned = returned || sites[s]->returnTo != 0;
@@ -1113,20 +1102,35 @@ bool Write(Site& site, const std::uint8_t* from, const std::uint8_t* to) {
     return written;
 }
 
-// Busy is worth another try later; Mismatch means the code at the site is not the code this cheat knows, so it is left alone.
-enum class Result { Done, Busy, Mismatch };
+// Busy is worth another try later; Mismatch means the code at the site is not the code this cheat knows, so it is left alone; Held means
+// the game still needs the patch, so nothing was written.
+enum class Result { Done, Busy, Mismatch, Held };
+
+// Our bytes mean installed and the original bytes mean not, so a rollback that failed is recorded; foreign bytes keep the recorded state.
+void TrackInstalled(Site& site) {
+    if (std::memcmp(game + site.rva, site.patched, site.size) == 0) {
+        site.installed = true;
+    } else if (std::memcmp(game + site.rva, site.original, site.size) == 0) {
+        site.installed = false;
+    }
+}
 
 // Only one thread may be between Stop and Resume: a key press and a finished wallet action can arrive together, and two threads stopping
 // each other would both stay stopped. It is taken before any thread is stopped, so a stopped thread never holds it.
 std::mutex transitions;
 
 // Installs or removes every site of one cheat together: a thread in any of them postpones the whole transition, and a site that cannot be
-// written rolls the earlier ones back. stop is false only before the game runs, when no thread can be in the code yet.
-Result Transition(Site* const sites[], std::size_t count, bool install, bool stop) {
+// written rolls the earlier ones back. stop is false only before the game runs. needed is read with the game stopped, so the game cannot
+// start needing the patch between the check and the removal.
+Result Transition(Site* const sites[], std::size_t count, bool install, bool stop, const std::atomic<bool>* needed = nullptr) {
     const std::lock_guard lock(transitions);
     for (int attempt = 0; attempt < (stop ? kTransitionTries : 1); ++attempt) {
         Stopped stopped;
         const bool ready = !stop || (Stop(stopped) && Outside(stopped, sites, count));
+        if (ready && needed != nullptr && needed->load()) {
+            Resume(stopped);
+            return Result::Held;
+        }
         std::size_t written = 0;
         if (ready) {
             for (; written < count; ++written) {
@@ -1142,18 +1146,17 @@ Result Transition(Site* const sites[], std::size_t count, bool install, bool sto
         }
         Resume(stopped);
         if (ready) {
-            if (written < count) return Result::Mismatch;
-            for (std::size_t i = 0; i < count; ++i) sites[i]->installed = install;
-            return Result::Done;
+            for (std::size_t i = 0; i < count; ++i) TrackInstalled(*sites[i]);
+            return written < count ? Result::Mismatch : Result::Done;
         }
         Sleep(kTransitionWaitMs);
     }
     return Result::Busy;
 }
 
-// Builds a trampoline and the entry jump to it without touching the game. start is the preamble that calls function, at is where its
-// address goes, and prologue the method's first whole instructions, at least kEntryJump bytes, with no rip-relative operand and no jump
-// into them; a shorter (empty) method is copied whole and the entry jump overwrites the padding after it.
+// Builds a trampoline and its entry jump without touching the game; at is where start takes function's address. prologue is the method's
+// first whole instructions, at least kEntryJump bytes, none rip-relative and none jumped into, or a whole shorter (empty) method, whose
+// padding the entry jump overwrites.
 template <typename Function>
 bool PrepareEntry(Site& site, const std::uint8_t* start, std::size_t startSize, std::size_t at, Function function, std::size_t prologue) {
     if (trampolines == nullptr || trampolinesUsed == kHooks || prologue > kMaxPrologue) return false;
@@ -1274,7 +1277,10 @@ bool Enable(Cheat& cheat, bool stop) {
     const Result result = Transition(cheat.sites, cheat.siteCount, true, stop);
     if (result != Result::Done) {
         if (SerializesAvPlayer(cheat)) SyncSafeTransition();
-        if (result == Result::Mismatch) cheat.available = false;
+        if (result == Result::Mismatch) {
+            cheat.available = false;
+            cheat.failed = Installed(cheat);
+        }
         std::fprintf(stderr, result == Result::Mismatch ? "%s: unavailable, its game code could not be patched\n"
                                                         : "%s: not turned on, the game was running this code\n", cheat.name);
         return false;
@@ -1283,12 +1289,14 @@ bool Enable(Cheat& cheat, bool stop) {
     return true;
 }
 
-// The cheat stops taking effect before its code is removed, so a call already in flight behaves as off. A restore the game was too busy
-// for is tried again on the next key press; code that is no longer ours is left as it is for good.
+// The cheat stops taking effect before its code is removed, so a call already in flight behaves as off. A busy restore is retried on the
+// next press, and code that is no longer ours is left for good. An open gate crossing still needs the gate hooks to give the player's
+// collisions back, so that OFF waits for OnFrame.
 void Disable(Cheat& cheat, bool stop) {
     cheat.active.store(false);
-    const Result result = Transition(cheat.sites, cheat.siteCount, false, stop);
-    cheat.failed = result != Result::Done;
+    const Result result = Transition(cheat.sites, cheat.siteCount, false, stop, &cheat == &gatePass ? &crossingOpen : nullptr);
+    cheat.pending = result == Result::Held;
+    cheat.failed = result != Result::Done && !cheat.pending;
     if (cheat.failed) {
         if (result == Result::Mismatch) cheat.available = false;
         std::fprintf(stderr, result == Result::Mismatch
@@ -1317,7 +1325,7 @@ void RemoveWalletHook() {
 
 const char* FactorText(int factor) { return factor == 2 ? "2x" : factor == 4 ? "4x" : factor == 6 ? "6x" : "OFF"; }
 
-// Attaches a cheat's sites. Every cheat starts OFF, so nothing is written to the game here.
+// Every cheat starts OFF, so binding writes nothing to the game.
 void Bind(Cheat& cheat, bool ready, Site* first, Site* second = nullptr, Site* third = nullptr) {
     cheat.sites[0] = first;
     cheat.sites[1] = second;
@@ -1327,9 +1335,9 @@ void Bind(Cheat& cheat, bool ready, Site* first, Site* second = nullptr, Site* t
     std::fprintf(stderr, ready ? "%s: OFF\n" : "%s: unavailable (game code not recognised)\n", cheat.name);
 }
 
-// The state text of a cheat whose patch is installed or stuck, or null.
 const char* ActiveState(const Cheat& cheat) {
     if (cheat.failed) return "FAILED";
+    if (cheat.pending) return "PENDING";
     if (cheat.factor == nullptr) return cheat.active.load() ? "ON" : nullptr;
     const int factor = cheat.factor->load();
     return factor == 1 ? nullptr : FactorText(factor);
@@ -1340,12 +1348,10 @@ void Announce(const Cheat& cheat, const char* notice) {
     std::fprintf(stderr, "%s: %s\n", cheat.name, state != nullptr ? state : "OFF");
 }
 
-// True when the cheat cannot change now, with its notice: one whose restore failed only retries the restore, and one whose game code is
-// not ours is refused.
+// A cheat whose restore failed only retries the restore, and one whose game code is not ours is refused.
 bool Unchangeable(Cheat& cheat, const char*& notice) {
     if (cheat.failed) {
         if (cheat.available) Disable(cheat, true);  // a restore the game was too busy for
-        notice = cheat.failed ? nullptr : "OFF";
         return true;
     }
     if (cheat.available) return false;
@@ -1353,14 +1359,17 @@ bool Unchangeable(Cheat& cheat, const char*& notice) {
     return true;
 }
 
-// Hotkeys and the menu both change toggles through here.
+// ON while an OFF is pending keeps the patch that is still installed.
 void SetToggle(Cheat& cheat, bool on) {
     const char* notice = nullptr;
     if (!Unchangeable(cheat, notice)) {
-        if (on == cheat.active.load()) return;
-        if (!on) {
+        if (on && cheat.pending) {
+            cheat.pending = false;
+            cheat.active.store(true);
+        } else if (on == cheat.active.load()) {
+            return;
+        } else if (!on) {
             Disable(cheat, true);
-            notice = cheat.failed ? nullptr : "OFF";
         } else if (!Enable(cheat, true)) {
             notice = cheat.available ? "busy" : "unavailable";
         }
@@ -1411,14 +1420,15 @@ void OnKey(int scancode) {
     }
 }
 
-// The menu's view of a multiplier, in the order of its combo box.
+// In the order of the menu's combo box.
 constexpr int kFactors[] = {1, 2, 4, 6};
 
+// A click on PENDING turns the cheat back on; a click on FAILED retries the restore.
 void DrawToggle(const HostMenuWidgets& ui, Cheat& cheat, const char* label) {
     bool on = cheat.active.load();
-    if (!ui.checkbox(label, &on, cheat.available, cheat.failed)) return;
-    std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s clicked\n", cheat.name);
-    SetToggle(cheat, on);
+    const HostControlState state = cheat.failed ? HostControlState::Failed : cheat.pending ? HostControlState::Pending : HostControlState::Normal;
+    if (!ui.checkbox(label, &on, cheat.available, state)) return;
+    SetToggle(cheat, on || cheat.pending);
 }
 
 void DrawMultiplier(const HostMenuWidgets& ui, Cheat& cheat, const char* label) {
@@ -1429,7 +1439,6 @@ void DrawMultiplier(const HostMenuWidgets& ui, Cheat& cheat, const char* label) 
         if (kFactors[i] == cheat.factor->load()) index = static_cast<int>(i);
     }
     if (!ui.combo(label, &index, items, static_cast<int>(std::size(items)), cheat.available, cheat.failed)) return;
-    std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s changed\n", cheat.name);
     SetFactor(cheat, kFactors[index]);
 }
 
@@ -1437,11 +1446,10 @@ void DrawAward(const HostMenuWidgets& ui, Award& award, const char* label, bool 
     const char* notice = award.notice.load();
     const char* status = notice != nullptr && NowMs() < award.noticeUntil.load() ? notice : "";
     if (!ui.statusButton(label, status, available, awardsUnavailable.load() == kWalletStillPatched)) return;
-    std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s clicked\n", award.name);
     Request(award);
 }
 
-// Drawn by the host overlay inside the menu window while it is open, on the window thread.
+// Drawn by the host overlay while the menu is open, on the window thread.
 void DrawMenu(const HostMenuWidgets& ui) {
     ui.heading("PLAYER");
     DrawToggle(ui, godMode, "God Mode (F1)");
@@ -1460,9 +1468,14 @@ void DrawMenu(const HostMenuWidgets& ui) {
     DrawAward(ui, upgradeMaterials, "Add 10 Upgrade Materials (F8)", awardsAvailable);
 }
 
-// Once per presented frame on the window thread, so a queued wallet action that no player takes in time is given up and its hook removed.
+// Once per presented frame on the window thread: a queued wallet action that no player takes in time is given up and its hook removed,
+// and a pending Pass Through Gates OFF completes once its crossing has ended.
 void OnFrame() {
     ExpireRequest(NowMs());
+    if (gatePass.pending && !crossingOpen.load()) {
+        Disable(gatePass, true);
+        Announce(gatePass, nullptr);
+    }
 }
 
 bool ArmTrampolines() {
@@ -1473,7 +1486,6 @@ bool ArmTrampolines() {
 }
 
 bool StartCheats() {
-    // With the master switch off the game code is not read and no callback is registered.
     if (!CheatsEnabled()) return false;
     game = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(L"Il2cppUserAssemblies.prx.guest.prx"));
     if (game == nullptr) return false;
@@ -1481,9 +1493,8 @@ bool StartCheats() {
     const bool fits = headers->OptionalHeader.SizeOfImage >= kGetGameObject + sizeof(void*);
     trampolines = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, kTrampolineSlot * kHooks, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 
-    // Recognising the game code and building the patches leaves the game untouched; only a cheat the launcher turns on is installed below.
-    // The hashes read the game's own bytes, so the ranges that leave out what another cheat rewrites are part of their constant and must
-    // stay as they are.
+    // Every fingerprint is taken here, once, before the callbacks that can install a patch are registered: some ranges cover another
+    // cheat's site and match only the game's own bytes.
     const bool godModeReady = fits && Hash({{0x80ecd0, 0x80f0b0}, {0xdab1a0, 0xdab6b0}, {0xdabaf0, 0xdabd90}}) == 0x4b6beba820a6ebce &&
         PrepareFilter(healthSite, 12, HealthFilter) && PrepareFilter(greyHealthSite, 13, GreyHealthFilter);
     const bool spiritReady = fits && Hash({{0xda20b0, 0xda2520}, {0xda2b10, 0xda2d10}, {0x80ecd0, 0x80f0b0}}) == 0xb0e9d2c9cfd2a0b1 &&
@@ -1495,8 +1506,7 @@ bool StartCheats() {
     const bool awardsReady = fits && Hash({{0x32fac0, 0x32fae0}, {0x5d12d0, 0x5d1390}, {0x5d35c0, 0x5d35d0}, {0x8c0810, 0x8c0950},
         {0x8c91b0, 0x8c92b0}, {0x8ce0f0, 0x8ce6d0}, {0x996d20, 0x996e70}, {0x9971b0, 0x997390}, {0xd11230, 0xd11300}}) == 0xdcbbc10a00bb8f1e &&
         PrepareFilter(walletSite, 1, ControllerFilter);
-    // Read only, never patched: Menu.GetPlayerGameobject, CoreGameEventsSubsystem.OnPlayerFinishedSetup and PlayerController.OnTakeControl
-    // hold every offset Player1 reads.
+    // Never patched: the methods Player1's offsets were read from.
     playerLookupRecognised = fits && Hash({{0x98b080, 0x98b170}, {0xcfeae0, 0xcfeba0}, {0x5d1de0, 0x5d1f60}}) == 0xe289ea042f4d786c;
     const bool movementReady = fits && Hash({{0x706620, 0x706b50}, {0x6ecf20, 0x6ed280}, {0x6f02e0, 0x6f06d0}, {0x708d70, 0x709360},
         {0x80ecd0, 0x80f0b0}}) == 0xe4fb67f213ff4921 && PrepareInputDelta();

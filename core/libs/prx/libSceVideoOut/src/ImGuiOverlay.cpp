@@ -7,8 +7,18 @@
 #include <algorithm>
 #include <cfloat>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace {
+
+bool ShowInGameFps() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SOS_SHOW_IN_GAME_FPS");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
 
 constexpr float kFontPixels = 18.0f;
 constexpr float kReferenceHeight = 1080.0f;
@@ -24,7 +34,9 @@ constexpr std::uint32_t kDescriptorPoolSize = 16;
 constexpr std::uint32_t kVertexBufferRing = 3;
 constexpr ImVec4 kHeadingColor{1.00f, 0.82f, 0.30f, 1.00f};
 constexpr ImVec4 kFailedColor{1.00f, 0.38f, 0.28f, 1.00f};
+constexpr ImVec4 kPendingColor = kHeadingColor;
 constexpr const char* kFailedText = "FAILED";
+constexpr const char* kPendingText = "PENDING";
 
 void ApplyStyle(float scale) {
     ImGuiStyle& style = ImGui::GetStyle();
@@ -80,46 +92,51 @@ void Separator() {
     ImGui::Separator();
 }
 
-// FAILED in red at the right end of the row: a button while a retry can be made, plain text once it cannot.
-bool FailedMark(float width, bool retry) {
+// A state word at the right end of the row: a button while it can be clicked, plain text once it cannot.
+bool StateMark(const char* text, const ImVec4& color, float width, bool clickable) {
     ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - width);
-    ImGui::PushStyleColor(ImGuiCol_Text, kFailedColor);
+    ImGui::PushStyleColor(ImGuiCol_Text, color);
     bool clicked = false;
-    if (retry) {
-        clicked = ImGui::Button(kFailedText, ImVec2(width, 0.0f));
+    if (clickable) {
+        clicked = ImGui::Button(text, ImVec2(width, 0.0f));
     } else {
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (width - ImGui::CalcTextSize(kFailedText).x) * 0.5f);
-        ImGui::TextUnformatted(kFailedText);
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (width - ImGui::CalcTextSize(text).x) * 0.5f);
+        ImGui::TextUnformatted(text);
     }
     ImGui::PopStyleColor();
     return clicked;
 }
 
-bool Checkbox(const char* label, bool* value, bool enabled, bool failed) {
-    if (!failed) {
+bool Checkbox(const char* label, bool* value, bool enabled, HostControlState state) {
+    if (state == HostControlState::Normal) {
         ImGui::BeginDisabled(!enabled);
         const bool changed = ImGui::Checkbox(label, value);
         ImGui::EndDisabled();
         return changed;
     }
-    // No box, so the row cannot read as off; the label keeps the place it has next to one.
+    // No box, so the row cannot read as on or off; the label keeps the place it has next to one.
+    const bool failed = state == HostControlState::Failed;
+    const char* const text = failed ? kFailedText : kPendingText;
     ImGui::PushID(label);
     ImGui::AlignTextToFramePadding();
     ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
     ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
     ImGui::TextUnformatted(label);
-    const bool retried = FailedMark(ImGui::CalcTextSize(kFailedText).x + 2.0f * ImGui::GetStyle().FramePadding.x, enabled);
+    const float width = ImGui::CalcTextSize(text).x + 2.0f * ImGui::GetStyle().FramePadding.x;
+    const bool clicked = StateMark(text, failed ? kFailedColor : kPendingColor, width, enabled);
     ImGui::PopID();
-    return retried;
+    return clicked;
 }
 
 bool Combo(const char* label, int* index, const char* const* items, int count, bool enabled, bool failed) {
     const float width = ImGui::GetFontSize() * kComboWidthEm;
     ImGui::PushID(label);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::AlignTextToFramePadding();
     bool changed = false;
     if (failed) {
         ImGui::TextUnformatted(label);
-        changed = FailedMark(width, enabled);
+        changed = StateMark(kFailedText, kFailedColor, width, enabled);
     } else {
         ImGui::BeginDisabled(!enabled);
         ImGui::TextUnformatted(label);
@@ -161,12 +178,12 @@ void DrawFramesPerSecond(double fps) {
 const HostMenuWidgets kWidgets{Heading, Separator, Checkbox, Combo, StatusButton};
 
 void CheckVkResult(VkResult result) {
-    if (result != VK_SUCCESS) std::fprintf(stderr, "[DEBUG_SAULO][ImGui] Vulkan call returned %d\n", static_cast<int>(result));
+    if (result != VK_SUCCESS) std::fprintf(stderr, "In-game overlay: Vulkan call returned %d\n", static_cast<int>(result));
 }
 
 bool Succeeded(VkResult result, const char* what) {
     if (result == VK_SUCCESS) return true;
-    std::fprintf(stderr, "[DEBUG_SAULO][ImGui] %s failed with %d\n", what, static_cast<int>(result));
+    std::fprintf(stderr, "In-game overlay: %s failed with %d\n", what, static_cast<int>(result));
     return false;
 }
 
@@ -182,7 +199,6 @@ bool ImGuiOverlay::ToggleKeyPressed(const SDL_Event& event) {
     if (window == nullptr || event.key.windowID != SDL_GetWindowID(window)) return false;
     open = !open;
     if (!open && state == State::Ready) ReleaseImGuiInput();
-    std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s\n", open ? "open" : "closed");
     return true;
 }
 
@@ -191,18 +207,18 @@ void ImGuiOverlay::ProcessEvent(const SDL_Event& event) {
 }
 
 bool ImGuiOverlay::Wanted(const AgcDriver::PresentationOverlayFrame& frame) {
-    if (!CheatsEnabled()) return false;
+    if (!CheatsEnabled() && !ShowInGameFps()) return false;
     if (state == State::Unready) {
         const bool started = window != nullptr && start(frame);
         if (!started) {
             Shutdown();
             state = State::Failed;
+            std::fprintf(stderr, "In-game overlay unavailable\n");
         } else {
             state = State::Ready;
         }
-        std::fprintf(stderr, "[DEBUG_SAULO][ImGui] %s\n", started ? "overlay ready" : "overlay unavailable");
     }
-    return state == State::Ready && frame.device == device && (open || framesPerSecondShown);
+    return state == State::Ready && frame.device == device && (open || ShowInGameFps());
 }
 
 void ImGuiOverlay::Record(const AgcDriver::PresentationOverlayFrame& frame) {
@@ -210,7 +226,7 @@ void ImGuiOverlay::Record(const AgcDriver::PresentationOverlayFrame& frame) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     if (open) drawMenu();
-    if (framesPerSecondShown) DrawFramesPerSecond(framesPerSecond);
+    if (ShowInGameFps()) DrawFramesPerSecond(framesPerSecond);
     ImGui::Render();
     const Target* target = targetFor(frame);
     if (target == nullptr) return;
@@ -232,17 +248,9 @@ void ImGuiOverlay::drawMenu() {
     if (ImGui::Begin(kMenuTitle, &open,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
         HostMenuDraw_nid_no_patch(kWidgets);
-        Separator();
-        Heading("OVERLAY");
-        if (Checkbox("Show FPS", &framesPerSecondShown, true, false)) {
-            std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] Show FPS %s\n", framesPerSecondShown ? "on" : "off");
-        }
     }
     ImGui::End();
-    if (!open) {
-        std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] closed by X\n");
-        ReleaseImGuiInput();
-    }
+    if (!open) ReleaseImGuiInput();
 }
 
 bool ImGuiOverlay::start(const AgcDriver::PresentationOverlayFrame& frame) {
@@ -343,6 +351,7 @@ bool ImGuiOverlay::createRenderPass(VkFormat format) {
 
 const ImGuiOverlay::Target* ImGuiOverlay::targetFor(const AgcDriver::PresentationOverlayFrame& frame) {
     if (frame.swapchain != swapchain) {
+        if (device != VK_NULL_HANDLE && vk.deviceWaitIdle != nullptr) vk.deviceWaitIdle(device);
         destroyTargets();
         swapchain = frame.swapchain;
     }
@@ -394,7 +403,6 @@ void ImGuiOverlay::Shutdown() noexcept {
     renderPass = VK_NULL_HANDLE;
     if (sdlStarted) ImGui_ImplSDL2_Shutdown();
     if (contextCreated) ImGui::DestroyContext();
-    if (contextCreated || vulkanStarted || sdlStarted) std::fprintf(stderr, "[DEBUG_SAULO][ImGui] shut down\n");
     contextCreated = false;
     sdlStarted = false;
     vulkanStarted = false;

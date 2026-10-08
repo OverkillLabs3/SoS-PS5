@@ -58,7 +58,6 @@ private:
     bool sdlStarted = false;
     bool vulkanStarted = false;
     double framesPerSecond = 0.0;
-    bool framesPerSecondShown = true;
     PFN_vkGetInstanceProcAddr instanceProc = nullptr;
     PFN_vkGetDeviceProcAddr deviceProc = nullptr;
     VkInstance instance = VK_NULL_HANDLE;
