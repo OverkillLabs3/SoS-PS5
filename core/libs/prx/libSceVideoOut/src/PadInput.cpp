@@ -26,6 +26,21 @@ PadInput::~PadInput() {
     closeController();
 }
 
+void PadInput::SetGameInputBlocked(bool blocked) {
+    if (blocked == gameInputBlocked) return;
+    gameInputBlocked = blocked;
+    std::fill(pressed.begin(), pressed.end(), false);
+    std::fill(wheelReleaseTimes.begin(), wheelReleaseTimes.end(), std::chrono::steady_clock::time_point{});
+    if (blocked) {
+        mouseModeBeforeBlock = mouseEnabled;
+        if (mouseEnabled) setMouseMode(false);
+    } else if (mouseModeBeforeBlock) {
+        mouseModeBeforeBlock = false;
+        setMouseMode(true);
+    }
+    publish();
+}
+
 void PadInput::openFirstAvailableController() {
     if (controller != nullptr) return;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
@@ -319,6 +334,7 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
     static const bool ignoreInput = std::getenv("APS5_NO_PAD_INPUT") != nullptr;
     if (ignoreInput && event.type == SDL_MOUSEWHEEL) return;
     if (event.type == SDL_MOUSEWHEEL) {
+        if (gameInputBlocked) return;
         int direction = (event.wheel.y > 0) - (event.wheel.y < 0);
         if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) direction = -direction;
         if (direction == 0) return;
@@ -349,6 +365,8 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
         if (!matches) continue;
         if (binding.control == Pad::InputControl::ToggleFullscreen) {
             if (keyboard && down && !pressed[index] && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) window.ToggleFullscreen();
+        } else if (gameInputBlocked) {
+            continue;
         }
         if (binding.control == Pad::InputControl::ToggleMouse && down && !pressed[index]) setMouseMode(!mouseEnabled);
         pressed[index] = down;
@@ -460,6 +478,11 @@ void PadInput::publish() {
     if (scriptStick) {
         state.sticks[0] = scriptStickAxes[0];
         state.sticks[1] = scriptStickAxes[1];
+    }
+    if (gameInputBlocked) {
+        const auto deviceKind = state.deviceKind;
+        state = PadInputState{};
+        state.deviceKind = deviceKind;
     }
     PadPublishInput_nid_postfix(state);
 }

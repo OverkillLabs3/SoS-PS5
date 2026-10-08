@@ -21,20 +21,17 @@ namespace {
 
 struct Cheat {
     const char* name;
-    const char* label;
     const char* variable;
     std::atomic<bool> on{false};
     bool hooked = false;
-    std::atomic<const char*> notice{nullptr};
-    std::atomic<std::uint64_t> noticeUntil{0};
 };
-Cheat godMode{"God Mode", "God Mode", "SOS_GOD_MODE"};
-Cheat infiniteSpirit{"Infinite Spartan Spirit", "Spartan Spirit", "SOS_INFINITE_SPARTAN_SPIRIT"};
-Cheat infiniteMagic{"Infinite Magic", "Magic", "SOS_INFINITE_MAGIC"};
-Cheat damageMultiplier{"Damage Multiplier", "Damage", "SOS_DAMAGE_MULTIPLIER"};  // its state is damageFactor, not on
-std::atomic<int> damageFactor{1};                                                 // 1 (off), 2, 4 or 6
-Cheat movementSpeed{"Movement Speed 2x", "Movement Speed", "SOS_MOVEMENT_SPEED"};
-Cheat jumpHeight{"Jump Height 2x", "Jump Height", "SOS_JUMP_HEIGHT"};
+Cheat godMode{"God Mode", "SOS_GOD_MODE"};
+Cheat infiniteSpirit{"Infinite Spartan Spirit", "SOS_INFINITE_SPARTAN_SPIRIT"};
+Cheat infiniteMagic{"Infinite Magic", "SOS_INFINITE_MAGIC"};
+Cheat damageMultiplier{"Damage Multiplier", "SOS_DAMAGE_MULTIPLIER"};  // its state is damageFactor, not on
+std::atomic<int> damageFactor{1};                                       // 1 (off), 2, 4 or 6
+Cheat movementSpeed{"Movement Speed 2x", "SOS_MOVEMENT_SPEED"};
+Cheat jumpHeight{"Jump Height 2x", "SOS_JUMP_HEIGHT"};
 
 constexpr const char* kBloodOrb[] = {"loot_orb_red"};
 // ItemGroup.Materials without its loot_boss_* trophies, which only their boss gives.
@@ -49,6 +46,7 @@ static_assert(std::size(kBloodOrb) <= kMostItems);
 enum : int { kIdle, kBloodOrbsQueued, kBloodOrbsRunning, kUpgradeMaterialsQueued, kUpgradeMaterialsRunning };
 std::atomic<int> walletAction{kIdle};
 std::atomic<std::uint64_t> walletRequestedAt{0};
+std::atomic<std::uint64_t> playerLastSeenAt{0};
 
 struct Award {
     const char* name;
@@ -61,17 +59,17 @@ struct Award {
     std::atomic<const char*> notice{nullptr};
     std::atomic<std::uint64_t> noticeUntil{0};
 };
-Award bloodOrbs{"Blood Orbs", " +1000", kBloodOrb, std::size(kBloodOrb), 1000, true, kBloodOrbsQueued, kBloodOrbsRunning};
-Award upgradeMaterials{"Upgrade Materials", " +10", kUpgradeMaterials, std::size(kUpgradeMaterials), 10, false, kUpgradeMaterialsQueued,
+Award bloodOrbs{"Blood Orbs", "+1000", kBloodOrb, std::size(kBloodOrb), 1000, true, kBloodOrbsQueued, kBloodOrbsRunning};
+Award upgradeMaterials{"Upgrade Materials", "+10", kUpgradeMaterials, std::size(kUpgradeMaterials), 10, false, kUpgradeMaterialsQueued,
                        kUpgradeMaterialsRunning};
 const char* awardsUnavailable = "game code not recognised";  // null once the wallet hook is installed
-const char* const kUnavailable = ": unavailable";
 
 // SDL scancodes
 constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kInfiniteMagicKey = 60, kDamageMultiplierKey = 61, kMovementSpeedKey = 62, kJumpHeightKey = 63,
               kBloodOrbsKey = 64, kUpgradeMaterialsKey = 65;
 constexpr std::uint64_t kNoticeMs = 2000;
 constexpr std::uint64_t kAwardWaitMs = 1000;
+constexpr std::uint64_t kPlayerTimeoutMs = 500;
 
 std::uint64_t NowMs() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -223,16 +221,18 @@ Vector2 APS5_VABI JumpDirection(void* jumpState) {
     return direction;
 }
 
-void Notify(Award& award, const char* failure, const char* item) {
-    if (failure == nullptr) {
-        std::fprintf(stderr, "%s:%s\n", award.name, award.added);
-    } else if (item == nullptr) {
-        std::fprintf(stderr, "%s: unavailable (%s)\n", award.name, failure);
-    } else {
-        std::fprintf(stderr, "%s: unavailable (%s: %s)\n", award.name, failure, item);
-    }
-    award.notice.store(failure != nullptr ? kUnavailable : award.added);
+void Added(Award& award) {
+    std::fprintf(stderr, "%s: %s\n", award.name, award.added);
+    award.notice.store(award.added);
     award.noticeUntil.store(NowMs() + kNoticeMs);
+}
+
+void Failed(const Award& award, const char* failure, const char* item) {
+    if (item == nullptr) {
+        std::fprintf(stderr, "%s: not added (%s)\n", award.name, failure);
+    } else {
+        std::fprintf(stderr, "%s: not added (%s: %s)\n", award.name, failure, item);
+    }
 }
 
 // GetCurrentAmount needs the count table the wallet creates at its first addition.
@@ -280,12 +280,17 @@ __attribute__((noinline)) void RunWalletAction(void* controller) {
     const WalletActionRun run;
     const char* item = nullptr;
     const char* failure = Give(award, controller, &item);
-    Notify(award, failure, item);
+    if (failure == nullptr) {
+        Added(award);
+    } else {
+        Failed(award, failure, item);
+    }
 }
 
 // PlayerController.Update, every frame on the game thread. The run is a separate function because a SysV function here cannot have
 // cleanups, and the release is a destructor.
 bool APS5_VABI ControllerFilter(void* controller, void*, void*, float*) {
+    if (Game<GetPawnObject>(kGetPawnObject)(controller, nullptr) != nullptr) playerLastSeenAt.store(NowMs());
     RunWalletAction(controller);
     return false;
 }
@@ -296,19 +301,19 @@ void ExpireRequest(std::uint64_t now) {
     if ((state != kBloodOrbsQueued && state != kUpgradeMaterialsQueued) || now < walletRequestedAt.load() + kAwardWaitMs) return;
     if (!walletAction.compare_exchange_strong(state, kIdle)) return;  // the game thread took it meanwhile
     Award& award = state == kBloodOrbsQueued ? bloodOrbs : upgradeMaterials;
-    Notify(award, "no player in the game", nullptr);
+    Failed(award, "no player in the game", nullptr);
 }
 
-// F7 or F8: queues its action unless a wallet action is queued or running. The expiry also runs here because the title, which runs it
-// otherwise, is only updated while frames are presented.
+// The one availability rule for the item actions, shared by the menu buttons and the F7/F8 keys.
+bool AwardsAvailable(std::uint64_t now) {
+    return awardsUnavailable == nullptr && walletAction.load() == kIdle && now < playerLastSeenAt.load() + kPlayerTimeoutMs;
+}
+
+// F7 or F8: queues its action when AwardsAvailable allows it.
 void Request(Award& award) {
-    if (awardsUnavailable != nullptr) {
-        Notify(award, awardsUnavailable, nullptr);
-        return;
-    }
     const std::uint64_t now = NowMs();
     ExpireRequest(now);
-    if (walletAction.load() != kIdle) return;
+    if (!AwardsAvailable(now)) return;
     walletRequestedAt.store(now);      // before the action is queued, so the expiry never reads an older time
     walletAction.store(award.queued);  // only this thread leaves idle
 }
@@ -486,11 +491,35 @@ void StartDamageMultiplier(bool recognised) {
 
 void SyncSafeTransition() { SafeTransition::Set(movementSpeed.on.load() || jumpHeight.on.load()); }
 
-// The title text of a cheat that is on, or null.
+// The state text of a cheat that is on, or null.
 const char* ActiveState(const Cheat& cheat) {
     if (&cheat != &damageMultiplier) return cheat.on.load() ? "ON" : nullptr;
     const int factor = damageFactor.load();
     return factor == 1 ? nullptr : FactorText(factor);
+}
+
+void Announce(const Cheat& cheat, const char* notice) {
+    std::fprintf(stderr, "%s: %s\n", cheat.name, notice != nullptr ? notice : ActiveState(cheat));
+}
+
+// Hotkeys and the menu both change toggles through here.
+void SetToggle(Cheat& cheat, bool on) {
+    if (!cheat.hooked) {
+        Announce(cheat, "unavailable");
+        return;
+    }
+    cheat.on.store(on);
+    if (&cheat == &movementSpeed || &cheat == &jumpHeight) SyncSafeTransition();
+    Announce(cheat, on ? nullptr : "OFF");
+}
+
+void SetDamageFactor(int factor) {
+    if (!damageMultiplier.hooked) {
+        Announce(damageMultiplier, "unavailable");
+        return;
+    }
+    damageFactor.store(factor);
+    Announce(damageMultiplier, factor == 1 ? "OFF" : nullptr);
 }
 
 // Runs on the window thread, where game objects must not be touched: keys only switch states or queue a wallet action.
@@ -507,41 +536,65 @@ void OnKey(int scancode) {
                  : scancode == kJumpHeightKey    ? &jumpHeight
                                                  : nullptr;
     if (cheat == nullptr) return;
-    const char* notice = "unavailable";
-    if (cheat == &damageMultiplier && cheat->hooked) {
+    if (cheat == &damageMultiplier) {
         const int factor = damageFactor.load();
-        const int next = factor == 1 ? 2 : factor == 2 ? 4 : factor == 4 ? 6 : 1;
-        damageFactor.store(next);
-        notice = next == 1 ? "OFF" : nullptr;
-    } else if (cheat->hooked) {
-        const bool on = !cheat->on.load();
-        cheat->on.store(on);
-        notice = on ? nullptr : "OFF";
-        if (cheat == &movementSpeed || cheat == &jumpHeight) SyncSafeTransition();
+        SetDamageFactor(factor == 1 ? 2 : factor == 2 ? 4 : factor == 4 ? 6 : 1);
+    } else {
+        SetToggle(*cheat, !cheat->on.load());
     }
-    std::fprintf(stderr, "%s: %s\n", cheat->name, notice != nullptr ? notice : ActiveState(*cheat));
-    cheat->notice.store(notice);
-    cheat->noticeUntil.store(notice != nullptr ? NowMs() + kNoticeMs : 0);
 }
 
-// Appended to the window title after the FPS counter, on the same thread as the keys.
-void TitleStatus(char* text, std::size_t size) {
+// The menu's view of the damage multiplier, in the order of its combo box.
+constexpr int kDamageFactors[] = {1, 2, 4, 6};
+
+void DrawToggle(const HostMenuWidgets& ui, Cheat& cheat, const char* label) {
+    bool on = cheat.on.load();
+    if (!ui.checkbox(label, &on, cheat.hooked)) return;
+    std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s clicked\n", cheat.name);
+    SetToggle(cheat, on);
+}
+
+void DrawDamage(const HostMenuWidgets& ui) {
+    const char* items[std::size(kDamageFactors)];
+    int index = 0;
+    for (std::size_t i = 0; i < std::size(kDamageFactors); ++i) {
+        items[i] = FactorText(kDamageFactors[i]);
+        if (kDamageFactors[i] == damageFactor.load()) index = static_cast<int>(i);
+    }
+    if (!ui.combo("Damage Multiplier (F4)", &index, items, static_cast<int>(std::size(items)), damageMultiplier.hooked)) return;
+    std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s changed\n", damageMultiplier.name);
+    SetDamageFactor(kDamageFactors[index]);
+}
+
+void DrawAward(const HostMenuWidgets& ui, Award& award, const char* label) {
     const std::uint64_t now = NowMs();
-    ExpireRequest(now);
-    std::size_t used = 0;
-    if (size != 0) text[0] = '\0';
-    for (const Cheat* cheat : {&godMode, &infiniteSpirit, &infiniteMagic, &damageMultiplier, &movementSpeed, &jumpHeight}) {
-        const char* state = ActiveState(*cheat);
-        if (state == nullptr && now < cheat->noticeUntil.load()) state = cheat->notice.load();
-        if (state == nullptr || used >= size) continue;
-        const int written = std::snprintf(text + used, size - used, " | %s: %s", cheat->label, state);
-        if (written > 0) used += static_cast<std::size_t>(written);
-    }
-    for (const Award* award : {&bloodOrbs, &upgradeMaterials}) {
-        if (now >= award->noticeUntil.load() || used >= size) continue;
-        const int written = std::snprintf(text + used, size - used, " | %s%s", award->name, award->notice.load());
-        if (written > 0) used += static_cast<std::size_t>(written);
-    }
+    const char* notice = award.notice.load();
+    const char* status = notice != nullptr && now < award.noticeUntil.load() ? notice : "";
+    if (!ui.statusButton(label, status, AwardsAvailable(now))) return;
+    std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s clicked\n", award.name);
+    Request(award);
+}
+
+// Drawn by the host overlay inside the menu window while it is open, on the window thread.
+void DrawMenu(const HostMenuWidgets& ui) {
+    ui.heading("PLAYER");
+    DrawToggle(ui, godMode, "God Mode (F1)");
+    DrawToggle(ui, infiniteSpirit, "Infinite Spartan Spirit (F2)");
+    DrawToggle(ui, infiniteMagic, "Infinite Magic (F3)");
+    DrawDamage(ui);
+    ui.separator();
+    ui.heading("MOVEMENT");
+    DrawToggle(ui, movementSpeed, "Movement Speed 2x (F5)");
+    DrawToggle(ui, jumpHeight, "Jump Height 2x (F6)");
+    ui.separator();
+    ui.heading("ITEMS");
+    DrawAward(ui, bloodOrbs, "Add 1000 Blood Orbs (F7)");
+    DrawAward(ui, upgradeMaterials, "Add 10 Upgrade Materials (F8)");
+}
+
+// Once per presented frame on the window thread, so a queued wallet action that no player takes in time reports its failure.
+void OnFrame() {
+    ExpireRequest(NowMs());
 }
 
 bool StartCheats() {
@@ -574,7 +627,8 @@ bool StartCheats() {
         {0x708d70, 0x709360}, {0x80ecd0, 0x80f0b0}}) == 0x6b8174068fca8cd1;
     Start(jumpHeight, jumpRecognised, {}, RedirectJumpDirection);
     SyncSafeTransition();
-    HostExtensionRegister_nid_no_patch(OnKey, TitleStatus);
+    HostExtensionRegister_nid_no_patch(OnKey, OnFrame);
+    HostExtensionRegisterMenu_nid_no_patch(DrawMenu);
     return true;
 }
 

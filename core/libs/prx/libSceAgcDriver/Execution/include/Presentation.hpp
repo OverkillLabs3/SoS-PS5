@@ -12,6 +12,7 @@
 namespace AgcDriver {
 
 class FrameTiming;
+class PresentationOverlay;
 
 struct PresentationWindow {
     void* context;
@@ -21,6 +22,7 @@ struct PresentationWindow {
     std::uint32_t width;
     std::uint32_t height;
     std::shared_ptr<FrameTiming> timing;
+    PresentationOverlay* overlay = nullptr;
 };
 
 }

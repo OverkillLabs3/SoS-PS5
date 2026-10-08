@@ -37,3 +37,9 @@ void KeyboardInput::HandleEvent(const SDL_Event& event, unsigned windowId) {
     }
     KeyboardPublishInput_nid_postfix(input);
 }
+
+void KeyboardInput::Reset() {
+    KeyboardInputEvent input{};
+    input.resetKeys = true;
+    KeyboardPublishInput_nid_postfix(input);
+}

@@ -25,6 +25,7 @@ public:
     ~PadInput();
     void HandleEvent(const SDL_Event& event, DisplayWindow& window);
     void Update();
+    void SetGameInputBlocked(bool blocked);
 
 private:
     void publish();
@@ -51,6 +52,8 @@ private:
     std::array<std::uint8_t, 2> mouseStick{128, 128};
     std::chrono::steady_clock::time_point nextMousePoll{};
     bool mouseEnabled = false;
+    bool gameInputBlocked = false;
+    bool mouseModeBeforeBlock = false;
     SDL_GameController* controller = nullptr;
     PadInputState controllerState{};
     std::uint32_t outputSequence = 0;

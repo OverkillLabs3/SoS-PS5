@@ -403,6 +403,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     }
     require(req.width != 0 && req.height != 0 && req.width <= static_cast<uint32_t>(std::numeric_limits<int>::max()) && req.height <= static_cast<uint32_t>(std::numeric_limits<int>::max()), "invalid window dimensions");
     window.Ensure(req.width, req.height);
+    overlay.Bind(window.Handle());
     unsigned extensionCount = 0;
     if (!SDL_Vulkan_GetInstanceExtensions(window.Handle(), &extensionCount, nullptr)) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
     std::vector<const char*> extensions(extensionCount);
@@ -423,7 +424,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         SDL_Vulkan_GetDrawableSize(static_cast<SDL_Window*>(context), &drawableWidth, &drawableHeight);
         *width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
         *height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
-    }, req.width, req.height, req.timing};
+    }, req.width, req.height, req.timing, &overlay};
     timing.Mark("window_prepare");
     const auto gpuReady = [](void* context) {
         auto& request = *static_cast<FlipRequest*>(context);
@@ -441,6 +442,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     }
     timing.Mark("present");
     window.UpdateTitle();
+    overlay.SetFramesPerSecond(window.FramesPerSecond());
     timing.Mark("window_title");
     std::lock_guard lock(req.cfg->mutex);
     timing.Mark("completion_mutex_wait");
@@ -474,6 +476,15 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
         PadInput padInput;
         MouseInput mouseInput;
         KeyboardInput keyboardInput;
+        bool menuInputBlocked = false;
+        const auto syncMenuInput = [&] {
+            if (overlay.IsOpen() == menuInputBlocked) return;
+            menuInputBlocked = overlay.IsOpen();
+            padInput.SetGameInputBlocked(menuInputBlocked);
+            keyboardInput.Reset();
+            mouseInput.Reset();
+            std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] game input %s\n", menuInputBlocked ? "blocked" : "restored");
+        };
         while (!token.stop_requested()) {
             {
                 std::unique_lock lock(flipQueue->mutex);
@@ -499,20 +510,26 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                     LibcRequestExit_nid_postfix(0);
                     throw ProcessShutdown{};
                 }
+                overlay.ProcessEvent(event);
+                if (overlay.ToggleKeyPressed(event)) {
+                    syncMenuInput();
+                    continue;
+                }
                 padInput.HandleEvent(event, window);
                 window.HandleEvent(event);
-                if (window.Handle() != nullptr) {
+                if (window.Handle() != nullptr && (!overlay.IsOpen() || event.type == SDL_WINDOWEVENT)) {
                     mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
                     keyboardInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
                 }
             }
-            window.UpdateCursor();
+            window.UpdateCursor(overlay.IsOpen());
             padInput.Update();
             if (current) {
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
                 current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
                 processFlip(*current);
+                syncMenuInput();
                 const auto finished = AgcDriver::FrameTiming::Clock::now();
                 AgcDriver::FrameTiming::Clock::duration interval{};
                 {
@@ -546,6 +563,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
             cancelled.swap(flipQueue->requests);
         }
     }
+    overlay.Shutdown();
     AgcDriverShutdown_nid_postfix();
     window.Destroy();
 }

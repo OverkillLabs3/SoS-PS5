@@ -53,3 +53,9 @@ void MouseInput::HandleEvent(const SDL_Event& event, unsigned windowId) {
     }
     MousePublishInput_nid_postfix(input);
 }
+
+void MouseInput::Reset() {
+    MouseInputEvent input{};
+    input.resetButtons = true;
+    MousePublishInput_nid_postfix(input);
+}
