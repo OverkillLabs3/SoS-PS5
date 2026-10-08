@@ -44,7 +44,7 @@ Any XInput/DualSense/DualShock gamepad works. Keyboard, mouse and gamepad can be
 
 F11 toggles fullscreen. The middle mouse button turns mouse-aim mode on or off (the mouse is captured and drives the right stick).
 
-F10 opens the In-Game Menu on the right side of the screen, which is mouse and keyboard usable. Its X button or F10 closes it. While it is open the game receives no controller, keyboard or mouse input, and F1-F8 and F11 keep working. Its Show FPS option turns the frame rate shown at the top left on or off.
+F10 opens the In-Game Menu on the right side of the screen, which is mouse and keyboard usable. Its X button or F10 closes it. While it is open the game receives no controller, keyboard or mouse input, and F1-F9 and F11 keep working. Its Show FPS option turns the frame rate shown at the top left on or off.
 
 ## Display settings
 The window that opens when you start `SonsOfSparta-PS5.exe` has two display settings. Press Play to save them; they are kept for later starts.
