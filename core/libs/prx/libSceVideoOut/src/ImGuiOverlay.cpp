@@ -2,6 +2,7 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_vulkan.h"
+#include "prx/common/CheatsEnabled.hpp"
 #include "prx/libkernel/HostExtension/include/HostExtension.hpp"
 #include <algorithm>
 #include <cfloat>
@@ -176,6 +177,7 @@ void ImGuiOverlay::Bind(SDL_Window* target) {
 }
 
 bool ImGuiOverlay::ToggleKeyPressed(const SDL_Event& event) {
+    if (!CheatsEnabled()) return false;
     if (event.type != SDL_KEYDOWN || event.key.repeat != 0 || event.key.keysym.scancode != SDL_SCANCODE_F10) return false;
     if (window == nullptr || event.key.windowID != SDL_GetWindowID(window)) return false;
     open = !open;
@@ -189,6 +191,7 @@ void ImGuiOverlay::ProcessEvent(const SDL_Event& event) {
 }
 
 bool ImGuiOverlay::Wanted(const AgcDriver::PresentationOverlayFrame& frame) {
+    if (!CheatsEnabled()) return false;
     if (state == State::Unready) {
         const bool started = window != nullptr && start(frame);
         if (!started) {

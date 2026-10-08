@@ -17,6 +17,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/HostExtension/include/HostExtension.hpp"
 #include "prx/libSceAvPlayer/include/SafeTransition.hpp"
+#include "prx/common/CheatsEnabled.hpp"
 
 namespace {
 
@@ -27,7 +28,6 @@ struct Site;
 
 struct Cheat {
     const char* name;
-    const char* variable;
     std::atomic<int>* factor = nullptr;  // a multiplier's magnitude, used instead of active: 1 (off), 2, 4 or 6
     Site* sites[3] = {};
     std::size_t siteCount = 0;
@@ -36,13 +36,13 @@ struct Cheat {
     bool failed = false;     // it is off but its patch is still in the game
 };
 std::atomic<int> damageFactor{1}, jumpFactor{1};
-Cheat godMode{"God Mode", "SOS_GOD_MODE"};
-Cheat infiniteSpirit{"Infinite Spartan Spirit", "SOS_INFINITE_SPARTAN_SPIRIT"};
-Cheat infiniteMagic{"Infinite Magic", "SOS_INFINITE_MAGIC"};
-Cheat damageMultiplier{"Damage Multiplier", "SOS_DAMAGE_MULTIPLIER", &damageFactor};
-Cheat movementSpeed{"Movement Speed 2x", "SOS_MOVEMENT_SPEED"};
-Cheat jumpHeight{"Jump Height", "SOS_JUMP_HEIGHT_MULTIPLIER", &jumpFactor};
-Cheat gatePass{"Pass Through Gates", "SOS_PASS_THROUGH_GATES"};
+Cheat godMode{"God Mode"};
+Cheat infiniteSpirit{"Infinite Spartan Spirit"};
+Cheat infiniteMagic{"Infinite Magic"};
+Cheat damageMultiplier{"Damage Multiplier", &damageFactor};
+Cheat movementSpeed{"Movement Speed 2x"};
+Cheat jumpHeight{"Jump Height", &jumpFactor};
+Cheat gatePass{"Pass Through Gates"};
 
 constexpr const char* kBloodOrb[] = {"loot_orb_red"};
 // ItemGroup.Materials without its loot_boss_* trophies, which only their boss gives.
@@ -1317,48 +1317,14 @@ void RemoveWalletHook() {
 
 const char* FactorText(int factor) { return factor == 2 ? "2x" : factor == 4 ? "4x" : factor == 6 ? "6x" : "OFF"; }
 
-// Only 2, 4 and 6 select a multiplier; anything else is off.
-int StartingFactor(const Cheat& cheat) {
-    const char* value = std::getenv(cheat.variable);
-    if (value == nullptr) return 1;
-    for (int factor : {2, 4, 6}) {
-        if (value[0] == '0' + factor && value[1] == '\0') return factor;
-    }
-    return 1;
-}
-
-// A cheat whose game code is not recognised stays unavailable; the others are not affected.
-void Bind(Cheat& cheat, bool ready, Site* first, Site* second, Site* third) {
+// Attaches a cheat's sites. Every cheat starts OFF, so nothing is written to the game here.
+void Bind(Cheat& cheat, bool ready, Site* first, Site* second = nullptr, Site* third = nullptr) {
     cheat.sites[0] = first;
     cheat.sites[1] = second;
     cheat.sites[2] = third;
     cheat.siteCount = third != nullptr ? 3 : second != nullptr ? 2 : 1;
     cheat.available = ready;
-    if (!ready) std::fprintf(stderr, "%s: unavailable (game code not recognised)\n", cheat.name);
-}
-
-// Nothing is written to the game for a cheat the launcher leaves off.
-void Start(Cheat& cheat, bool ready, Site* first, Site* second = nullptr, Site* third = nullptr) {
-    Bind(cheat, ready, first, second, third);
-    if (!cheat.available) return;
-    const char* const value = std::getenv(cheat.variable);
-    if (value == nullptr || std::strcmp(value, "1") != 0) {
-        std::fprintf(stderr, "%s: OFF\n", cheat.name);
-    } else if (Enable(cheat, false)) {
-        std::fprintf(stderr, "%s: ON\n", cheat.name);
-    }
-}
-
-void StartMultiplier(Cheat& cheat, bool ready, Site* first, Site* second = nullptr) {
-    Bind(cheat, ready, first, second, nullptr);
-    if (!cheat.available) return;
-    const int factor = StartingFactor(cheat);
-    if (factor == 1) {
-        std::fprintf(stderr, "%s: OFF\n", cheat.name);
-    } else if (Enable(cheat, false)) {
-        cheat.factor->store(factor);
-        std::fprintf(stderr, "%s: %s\n", cheat.name, FactorText(factor));
-    }
+    std::fprintf(stderr, ready ? "%s: OFF\n" : "%s: unavailable (game code not recognised)\n", cheat.name);
 }
 
 // The state text of a cheat whose patch is installed or stuck, or null.
@@ -1423,6 +1389,7 @@ void SetFactor(Cheat& cheat, int next) {
 
 // Runs on the window thread, where game objects must not be touched: keys only install or remove patches and queue a wallet action.
 void OnKey(int scancode) {
+    if (!CheatsEnabled()) return;
     if (scancode == kBloodOrbsKey || scancode == kUpgradeMaterialsKey) {
         Request(scancode == kBloodOrbsKey ? bloodOrbs : upgradeMaterials);
         return;
@@ -1506,6 +1473,8 @@ bool ArmTrampolines() {
 }
 
 bool StartCheats() {
+    // With the master switch off the game code is not read and no callback is registered.
+    if (!CheatsEnabled()) return false;
     game = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(L"Il2cppUserAssemblies.prx.guest.prx"));
     if (game == nullptr) return false;
     const auto* headers = reinterpret_cast<const IMAGE_NT_HEADERS*>(game + reinterpret_cast<const IMAGE_DOS_HEADER*>(game)->e_lfanew);
@@ -1542,21 +1511,21 @@ bool StartCheats() {
         PrepareGateMove() && PrepareBlockedAhead() && PreparePhysicsLock();
     const bool armed = ArmTrampolines();
 
-    Start(godMode, godModeReady && armed, &healthSite, &greyHealthSite);
-    Start(infiniteSpirit, spiritReady && armed, &spiritSite);
-    Start(infiniteMagic, magicReady, &manaSite);
-    StartMultiplier(damageMultiplier, damageReady, &hitDamageSite);
+    Bind(godMode, godModeReady && armed, &healthSite, &greyHealthSite);
+    Bind(infiniteSpirit, spiritReady && armed, &spiritSite);
+    Bind(infiniteMagic, magicReady, &manaSite);
+    Bind(damageMultiplier, damageReady, &hitDamageSite);
     if (awardsReady && armed) awardsUnavailable.store(nullptr);
     if (const char* const unavailable = awardsUnavailable.load()) {
         std::fprintf(stderr, "Blood Orbs and Upgrade Materials: unavailable (%s)\n", unavailable);
     } else {
         std::fprintf(stderr, "Blood Orbs and Upgrade Materials: ready%s\n", playerLookupRecognised ? "" : " (player check not recognised)");
     }
-    Start(movementSpeed, movementReady, &inputDeltaSite);
-    StartMultiplier(jumpHeight, jumpReady, &jumpDirectionSite);
+    Bind(movementSpeed, movementReady, &inputDeltaSite);
+    Bind(jumpHeight, jumpReady, &jumpDirectionSite);
     // All three sites or none: with only the collision bypass the run states would still stop short of the gate, with only the movement
     // bypass the player would run into it, and without the lock observer gate IDs would outlive a world transition.
-    Start(gatePass, gateReady && armed, &gateMoveSite, &blockedAheadSite, &physicsLockSite);
+    Bind(gatePass, gateReady && armed, &gateMoveSite, &blockedAheadSite, &physicsLockSite);
     SyncSafeTransition();
     HostExtensionRegister_nid_no_patch(OnKey, OnFrame);
     HostExtensionRegisterMenu_nid_no_patch(DrawMenu);

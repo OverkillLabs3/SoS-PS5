@@ -48,53 +48,22 @@ const Resolution kResolutions[] = {{0, L"3840 x 2160 (4K)"}, {6, L"2560 x 1440 (
 // Host settings that do not belong in the game's save, read with the Windows profile API from launcher.ini.
 const wchar_t* kLauncherIni = L"\\launcher.ini";
 
-// [Cheats] holds the state each cheat starts with; column and row are its place in the Cheats group.
-struct Cheat { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int column; int row; };
-const Cheat kCheats[] = {{L"god_mode", L"God Mode (F1)", L"SOS_GOD_MODE", 103, 0, 0},
-                         {L"infinite_spartan_spirit", L"Infinite Spartan Spirit (F2)", L"SOS_INFINITE_SPARTAN_SPIRIT", 104, 0, 1},
-                         {L"infinite_magic", L"Infinite Magic (F3)", L"SOS_INFINITE_MAGIC", 107, 0, 2},
-                         {L"movement_speed", L"Movement Speed 2x (F5)", L"SOS_MOVEMENT_SPEED", 105, 1, 0},
-                         {L"pass_through_gates", L"Pass Through Gates (F9)", L"SOS_PASS_THROUGH_GATES", 112, 1, 2}};
-constexpr size_t kCheatCount = sizeof(kCheats) / sizeof(kCheats[0]);
-// A multiplier's key and variable exist only for 2x, 4x and 6x; Off is stored as no key. legacy is an earlier on/off key: exactly 1
-// still reads as 2x while the multiplier key holds no valid value, and Play removes it.
-struct Multiplier { const wchar_t* key; const wchar_t* label; const wchar_t* variable; int id; int column; int row; int comboWidth; const wchar_t* legacy; };
-const Multiplier kMultipliers[] = {{L"damage_multiplier", L"Damage Multiplier (F4)", L"SOS_DAMAGE_MULTIPLIER", 108, 0, 3, 100, nullptr},
-                                   {L"jump_height_multiplier", L"Jump Height (F6)", L"SOS_JUMP_HEIGHT_MULTIPLIER", 106, 1, 1, 80, L"jump_height"}};
-constexpr size_t kMultiplierCount = sizeof(kMultipliers) / sizeof(kMultipliers[0]);
-const struct { const wchar_t* label; int factor; } kFactors[] = {{L"Off", 1}, {L"2x", 2}, {L"4x", 4}, {L"6x", 6}};
-// Listed for information only, one per column; nothing about them is stored.
-const wchar_t* const kCheatKeys[] = {L"F7  Add 1000 Blood Orbs", L"F8  Add 10 Upgrade Materials"};
-constexpr size_t kCheatKeyCount = sizeof(kCheatKeys) / sizeof(kCheatKeys[0]);
-constexpr int kCheatKeysRow = 4;
-
-// Only the value 1 turns a cheat on.
-bool ReadCheat(const std::wstring& directory, const wchar_t* key) {
-    wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"Cheats", key, L"0", value, 8, (directory + kLauncherIni).c_str());
-    return wcscmp(value, L"1") == 0;
-}
-
-// Only 2, 4 and 6 select a multiplier; anything else is 1, off.
-int ReadFactor(const std::wstring& directory, const wchar_t* key) {
-    wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"Cheats", key, L"1", value, 8, (directory + kLauncherIni).c_str());
-    for (const auto& option : kFactors) {
-        if (std::to_wstring(option.factor) == value) return option.factor;
-    }
-    return 1;
-}
-
-int ReadMultiplier(const std::wstring& directory, const Multiplier& multiplier) {
-    const int factor = ReadFactor(directory, multiplier.key);
-    return factor == 1 && multiplier.legacy != nullptr && ReadCheat(directory, multiplier.legacy) ? 2 : factor;
-}
+// Legacy cheat variables are kept out of the game's environment; the game reads only SOS_CHEATS_ENABLED.
+const wchar_t* const kLegacyCheatVariables[] = {L"SOS_CHEAT_MENU", L"SOS_GOD_MODE", L"SOS_INFINITE_SPARTAN_SPIRIT", L"SOS_INFINITE_MAGIC",
+                                                L"SOS_DAMAGE_MULTIPLIER", L"SOS_MOVEMENT_SPEED", L"SOS_JUMP_HEIGHT", L"SOS_JUMP_HEIGHT_MULTIPLIER",
+                                                L"SOS_PASS_THROUGH_GATES"};
 
 // The default is a value no one stores, so it comes back only when there is no such key.
-bool HasCheatKey(const std::wstring& directory, const wchar_t* key) {
+bool HasSetting(const std::wstring& directory, const wchar_t* key) {
     wchar_t value[2] = {};
     GetPrivateProfileStringW(L"Cheats", key, L"\x01", value, 2, (directory + kLauncherIni).c_str());
     return value[0] != L'\x01';
+}
+
+bool ReadCheatsEnabled(const std::wstring& directory) {
+    wchar_t value[8] = {};
+    GetPrivateProfileStringW(L"Cheats", L"enable_cheats", L"0", value, 8, (directory + kLauncherIni).c_str());
+    return wcscmp(value, L"1") == 0;
 }
 
 bool ReadBorderless(const std::wstring& directory) {
@@ -773,27 +742,18 @@ struct Launcher {
     static constexpr UINT kMaxLayoutDpi = 168;
     // Physical pixels kept free at the work-area edges when the window has to shrink or move to fit.
     static constexpr int kWorkAreaMargin = 24;
-    // Client area at 100% with both sections expanded. It and every control are scaled from these 96-DPI values, never from the current
-    // size, so moving between monitors cannot add up rounding errors.
-    // The Quality of Life section includes the two-line Skip dialogue hint; the Cheats section has two columns with the cheat keys in the
-    // last row. A collapsed section keeps only its header, and what follows moves up.
+    // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
+    // monitors cannot add up rounding errors. The Quality of Life section includes the two-line Skip dialogue hint.
     static constexpr int kQualityTop = 272, kQualityRows = 4, kSkipDialogueHint = 50;
     static constexpr int kQualityHeight = 70 + 32 * (kQualityRows - 1) + kSkipDialogueHint;
-    static constexpr int kCheatRows = kCheatKeysRow + 1;
-    static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 70 + 32 * (kCheatRows - 1), kButtonsTop = kCheatsTop + kCheatsHeight + 16;
-    static constexpr int kHeaderOffset = 4, kCollapsedSection = 30 - kHeaderOffset;
+    static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 96, kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 620, kHeight = kButtonsTop + 48;
-    static constexpr int kColumnLeft[] = {44, 360}, kColumnWidth[] = {276, kWidth - 44 - kColumnLeft[1]};
-    static constexpr int kCheatsHeaderId = 109, kQualityHeaderId = 110;
     // Added to the width a checkbox reports for its label so rounding never clips the last character.
     static constexpr int kCheckboxPadding = 4;
     struct Placed { HWND control; RECT bounds; HFONT* face; bool checkbox = false; };
     HWND window = nullptr;
     HWND mode = nullptr;
     HWND resolution = nullptr;
-    HWND qualityHeader = nullptr;
-    std::vector<HWND> qualityContents;
-    bool qualityExpanded = false;
     HWND skip = nullptr;
     HWND skipDialogueBox = nullptr;
     HWND ladderGrabBox = nullptr;
@@ -806,16 +766,9 @@ struct Launcher {
     bool skipDialogue = false;
     bool ladderGrabWithUp = false;
     bool revealFullMap = false;
+    bool cheatsEnabled = false;
     bool play = false;
-    HWND cheatBoxes[kCheatCount] = {};
-    bool cheats[kCheatCount] = {};
-    HWND multiplierBoxes[kMultiplierCount] = {};
-    int multipliers[kMultiplierCount] = {};
-    HWND cheatsHeader = nullptr;
-    std::vector<HWND> cheatContents;
-    bool cheatsExpanded = false;
-    RECT togglePlace{};
-    LONG toggleLeftPlusRight = 0;
+    HWND cheatsBox = nullptr;
     template <typename Function> static Function User32(const char* name) {
         return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
     }
@@ -845,14 +798,6 @@ struct Launcher {
         GetMonitorInfoW(monitor, &info);
         return info.rcWork;
     }
-    // How far a control placed at top moves up because of the collapsed sections above it.
-    int Shift(int top) const {
-        int shift = 0;
-        if (!qualityExpanded && top >= kCheatsTop - kHeaderOffset) shift -= kQualityHeight - kCollapsedSection;
-        if (!cheatsExpanded && top >= kButtonsTop) shift -= kCheatsHeight - kCollapsedSection;
-        return shift;
-    }
-    int Height() const { return kHeight + Shift(kHeight); }
     // Grows a client rectangle to the window rectangle; the caption and borders follow the real DPI.
     void Frame(RECT* rect, UINT dpi) const {
         const DWORD style = static_cast<DWORD>(GetWindowLongW(window, GWL_STYLE)), exStyle = static_cast<DWORD>(GetWindowLongW(window, GWL_EXSTYLE));
@@ -860,7 +805,7 @@ struct Launcher {
         if (adjust == nullptr || !adjust(rect, style, FALSE, exStyle, dpi)) AdjustWindowRectEx(rect, style, FALSE, exStyle);
     }
     SIZE WindowSize(UINT dpi, int layoutDpi) const {
-        RECT frame{0, 0, MulDiv(kWidth, layoutDpi, USER_DEFAULT_SCREEN_DPI), MulDiv(Height(), layoutDpi, USER_DEFAULT_SCREEN_DPI)};
+        RECT frame{0, 0, MulDiv(kWidth, layoutDpi, USER_DEFAULT_SCREEN_DPI), MulDiv(kHeight, layoutDpi, USER_DEFAULT_SCREEN_DPI)};
         Frame(&frame, dpi);
         return SIZE{frame.right - frame.left, frame.bottom - frame.top};
     }
@@ -885,8 +830,7 @@ struct Launcher {
         heading = CreateFontW(fontHeight(24), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
         for (const auto& item : placed) {
             SendMessageW(item.control, WM_SETFONT, reinterpret_cast<WPARAM>(*item.face), FALSE);
-            RECT b = item.bounds;
-            OffsetRect(&b, 0, Shift(b.top));
+            const RECT& b = item.bounds;
             int width = scale(b.right) - scale(b.left);
             if (item.checkbox) width = LabelWidth(item.control, width, scale(kCheckboxPadding));
             MoveWindow(item.control, scale(b.left), scale(b.top), width, scale(b.bottom) - scale(b.top), FALSE);
@@ -894,7 +838,7 @@ struct Launcher {
         if (oldFont != nullptr) DeleteObject(oldFont);
         if (oldHeading != nullptr) DeleteObject(oldHeading);
         const SIZE size = WindowSize(dpi, layoutDpi);
-        const int clientWidth = scale(kWidth), clientHeight = scale(Height());
+        const int clientWidth = scale(kWidth), clientHeight = scale(kHeight);
         WINDOWPLACEMENT placement{};
         placement.length = sizeof(placement);
         if (IsIconic(window) && GetWindowPlacement(window, &placement)) {
@@ -903,7 +847,7 @@ struct Launcher {
             placement.rcNormalPosition.bottom = placement.rcNormalPosition.top + size.cy;
             SetWindowPlacement(window, &placement);
         } else {
-            // Windows suggests the place after a DPI change and Toggle after a toggle; at first the window is centered in the work area of its monitor.
+            // Windows suggests the place after a DPI change; at first the window is centered in the work area of its monitor.
             const int x = suggested != nullptr ? suggested->left : work.left + max(0L, work.right - work.left - size.cx) / 2;
             const int y = suggested != nullptr ? suggested->top : work.top + max(0L, work.bottom - work.top - size.cy) / 2;
             SetWindowPos(window, nullptr, x, y, size.cx, size.cy, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -915,33 +859,6 @@ struct Launcher {
         }
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
-    static void ShowSection(HWND header, const wchar_t* title, const std::vector<HWND>& contents, bool expanded) {
-        SetWindowTextW(header, (std::wstring(expanded ? L"\u25BE " : L"\u25B8 ") + title).c_str());
-        for (HWND control : contents) ShowWindow(control, expanded ? SW_SHOW : SW_HIDE);
-    }
-    void ShowSections() {
-        ShowSection(qualityHeader, L"Quality of Life", qualityContents, qualityExpanded);
-        ShowSection(cheatsHeader, L"Cheats", cheatContents, cheatsExpanded);
-    }
-    // The window keeps its top and horizontal center and moves only as far as needed to stay inside the work area.
-    void Toggle(HWND header, const std::vector<HWND>& contents, bool& expanded) {
-        if (std::find(contents.begin(), contents.end(), GetFocus()) != contents.end()) SetFocus(header);
-        expanded = !expanded;
-        ShowSections();
-        const UINT dpi = Dpi(window);
-        const RECT work = WorkArea(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST));
-        const SIZE size = ScaledSize(dpi, work);
-        RECT place{};
-        GetWindowRect(window, &place);
-        // Halving the width rounds, so the center of the first of several toggles is kept until the window is moved some other way.
-        if (!EqualRect(&place, &togglePlace)) toggleLeftPlusRight = place.left + place.right;
-        place.left = max(work.left, min((toggleLeftPlusRight - size.cx) / 2, work.right - kWorkAreaMargin - size.cx));
-        place.top = max(work.top, min(place.top, work.bottom - kWorkAreaMargin - size.cy));
-        place.right = place.left + size.cx;
-        place.bottom = place.top + size.cy;
-        Layout(dpi, &place);
-        GetWindowRect(window, &togglePlace);
-    }
     static LRESULT CALLBACK Proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         auto* self = reinterpret_cast<Launcher*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (message == kGetDpiScaledSize && self != nullptr) {
@@ -952,14 +869,6 @@ struct Launcher {
             if (self != nullptr) self->Layout(HIWORD(wParam), reinterpret_cast<const RECT*>(lParam));
             return 0;
         }
-        if (message == WM_COMMAND && self != nullptr && LOWORD(wParam) == kQualityHeaderId) {
-            self->Toggle(self->qualityHeader, self->qualityContents, self->qualityExpanded);
-            return 0;
-        }
-        if (message == WM_COMMAND && self != nullptr && LOWORD(wParam) == kCheatsHeaderId) {
-            self->Toggle(self->cheatsHeader, self->cheatContents, self->cheatsExpanded);
-            return 0;
-        }
         if (message == WM_COMMAND && self != nullptr && (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)) {
             self->play = LOWORD(wParam) == IDOK;
             self->borderless = SendMessageW(self->mode, CB_GETCURSEL, 0, 0) == 1;
@@ -968,11 +877,7 @@ struct Launcher {
             self->ladderGrabWithUp = SendMessageW(self->ladderGrabBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->revealFullMap = SendMessageW(self->revealFullMapBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
-            for (size_t i = 0; i < kCheatCount; ++i) self->cheats[i] = SendMessageW(self->cheatBoxes[i], BM_GETCHECK, 0, 0) == BST_CHECKED;
-            for (size_t i = 0; i < kMultiplierCount; ++i) {
-                const LRESULT index = SendMessageW(self->multiplierBoxes[i], CB_GETCURSEL, 0, 0);
-                if (index != CB_ERR) self->multipliers[i] = static_cast<int>(SendMessageW(self->multiplierBoxes[i], CB_GETITEMDATA, static_cast<WPARAM>(index), 0));
-            }
+            self->cheatsEnabled = SendMessageW(self->cheatsBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             DestroyWindow(hwnd);
             return 0;
         }
@@ -985,17 +890,12 @@ struct Launcher {
     }
     // Shows the settings and saves them when Play is pressed; false means the player closed the launcher instead.
     bool Run(const std::wstring& directory, HICON icon) {
-        for (size_t i = 0; i < kCheatCount; ++i) cheats[i] = ReadCheat(directory, kCheats[i].key);
-        for (size_t i = 0; i < kMultiplierCount; ++i) multipliers[i] = ReadMultiplier(directory, kMultipliers[i]);
         borderless = ReadBorderless(directory);
         skipIntro = ReadSkipIntro(directory);
         skipDialogue = ReadSkipDialogue(directory);
         ladderGrabWithUp = ReadLadderGrabWithUp(directory);
         revealFullMap = ReadRevealFullMap(directory);
-        // Each section starts expanded when one of its options is on; collapsing or expanding it later is not stored.
-        qualityExpanded = skipIntro || skipDialogue || ladderGrabWithUp || revealFullMap;
-        cheatsExpanded = std::any_of(std::begin(multipliers), std::end(multipliers), [](int factor) { return factor != 1; }) ||
-                         std::find(std::begin(cheats), std::end(cheats), true) != std::end(cheats);
+        cheatsEnabled = ReadCheatsEnabled(directory);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
         // scaling the window as a bitmap, as before.
@@ -1049,10 +949,7 @@ struct Launcher {
         // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
         control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
-        // Each header sits on its group's top edge; WS_CLIPSIBLINGS keeps the frame from being drawn over it.
-        qualityHeader = control(L"BUTTON", nullptr, BS_PUSHBUTTON | WS_TABSTOP, 24, kQualityTop - kHeaderOffset, 140, 30, kQualityHeaderId, font);
-        const size_t firstQuality = placed.size();
-        control(L"BUTTON", nullptr, BS_GROUPBOX | WS_CLIPSIBLINGS, 24, kQualityTop, kWidth - 48, kQualityHeight, 0, font);
+        control(L"BUTTON", L"Quality of Life", BS_GROUPBOX, 24, kQualityTop, kWidth - 48, kQualityHeight, 0, font);
         skip = checkBox(L"Skip intro", 44, kQualityTop + 30, kWidth - 88, 102);
         skipDialogueBox = checkBox(L"Skip dialogue", 44, kQualityTop + 30 + 32, kWidth - 88, 111);
         // The line break keeps both lines inside the indented box at every scale.
@@ -1060,33 +957,9 @@ struct Launcher {
                 kWidth - 108, 48, 0, font);
         ladderGrabBox = checkBox(L"Grab ladders with Up", 44, kQualityTop + 30 + 32 * 2 + kSkipDialogueHint, kWidth - 88, 114);
         revealFullMapBox = checkBox(L"Reveal full Map", 44, kQualityTop + 30 + 32 * 3 + kSkipDialogueHint, kWidth - 88, 115);
-        for (size_t i = firstQuality; i < placed.size(); ++i) qualityContents.push_back(placed[i].control);
-        cheatsHeader = control(L"BUTTON", nullptr, BS_PUSHBUTTON | WS_TABSTOP, 24, kCheatsTop - kHeaderOffset, 92, 30, kCheatsHeaderId, font);
-        const size_t firstCheat = placed.size();
-        control(L"BUTTON", nullptr, BS_GROUPBOX | WS_CLIPSIBLINGS, 24, kCheatsTop, kWidth - 48, kCheatsHeight, 0, font);
-        auto rowTop = [](int row) { return kCheatsTop + 30 + 32 * row; };
-        for (size_t i = 0; i < kCheatCount; ++i) {
-            const Cheat& cheat = kCheats[i];
-            cheatBoxes[i] = checkBox(cheat.label, kColumnLeft[cheat.column], rowTop(cheat.row), kColumnWidth[cheat.column], cheat.id);
-            SendMessageW(cheatBoxes[i], BM_SETCHECK, cheats[i] ? BST_CHECKED : BST_UNCHECKED, 0);
-            for (size_t j = 0; j < kMultiplierCount; ++j) {
-                const Multiplier& multiplier = kMultipliers[j];
-                if (multiplier.column != cheat.column || multiplier.row != cheat.row + 1) continue;  // created here so the tab order follows the F keys
-                const int left = kColumnLeft[multiplier.column], combo = left + kColumnWidth[multiplier.column] - multiplier.comboWidth;
-                control(L"STATIC", multiplier.label, SS_CENTERIMAGE, left, rowTop(multiplier.row), combo - 8 - left, 28, 0, font);
-                multiplierBoxes[j] = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, combo, rowTop(multiplier.row), multiplier.comboWidth, 200,
-                                             multiplier.id, font);
-                for (const auto& option : kFactors) {
-                    const WPARAM item = static_cast<WPARAM>(SendMessageW(multiplierBoxes[j], CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option.label)));
-                    SendMessageW(multiplierBoxes[j], CB_SETITEMDATA, item, static_cast<LPARAM>(option.factor));
-                    if (option.factor == multipliers[j]) SendMessageW(multiplierBoxes[j], CB_SETCURSEL, item, 0);
-                }
-            }
-        }
-        for (size_t i = 0; i < kCheatKeyCount; ++i) {
-            control(L"STATIC", kCheatKeys[i], SS_CENTERIMAGE, kColumnLeft[i], rowTop(kCheatKeysRow), kColumnWidth[i], 28, 0, font);
-        }
-        for (size_t i = firstCheat; i < placed.size(); ++i) cheatContents.push_back(placed[i].control);
+        control(L"BUTTON", L"Cheats", BS_GROUPBOX, 24, kCheatsTop, kWidth - 48, kCheatsHeight, 0, font);
+        cheatsBox = checkBox(L"Enable cheats", 44, kCheatsTop + 30, kWidth - 88, 116);
+        control(L"STATIC", L"Press F10 in game to open the cheat menu", 0, 64, kCheatsTop + 30 + 28 + 2, kWidth - 108, 24, 0, font);
         HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, kWidth / 2 - 5 - 92, kButtonsTop, 92, 30, IDOK, font);
         control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, kWidth / 2 + 5, kButtonsTop, 92, 30, IDCANCEL, font);
 
@@ -1097,6 +970,7 @@ struct Launcher {
         SendMessageW(skipDialogueBox, BM_SETCHECK, skipDialogue ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(ladderGrabBox, BM_SETCHECK, ladderGrabWithUp ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(revealFullMapBox, BM_SETCHECK, revealFullMap ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(cheatsBox, BM_SETCHECK, cheatsEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
 
         const int fromFile = ReadResolutionFile(directory);
         const int current = fromFile >= 0 ? fromFile : ReadIntSetting(directory, kResolutionKey);
@@ -1112,7 +986,6 @@ struct Launcher {
         }
         SendMessageW(resolution, CB_SETCURSEL, selected, 0);
 
-        ShowSections();
         Layout(Dpi(window), nullptr);
         ShowWindow(window, SW_SHOWNORMAL);
         SetForegroundWindow(window);
@@ -1156,23 +1029,11 @@ struct Launcher {
         if (play && revealFullMap != ReadRevealFullMap(directory) && !saveIni(L"QualityOfLife", L"RevealFullMap", revealFullMap ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Reveal full Map setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
-        for (size_t i = 0; i < kCheatCount; ++i) {
-            if (play && cheats[i] != ReadCheat(directory, kCheats[i].key) && !saveIni(L"Cheats", kCheats[i].key, cheats[i] ? L"1" : L"0")) {
-                const std::wstring text = L"The " + std::wstring(kCheats[i].label) + L" setting could not be saved. It is used for this start only.";
-                MessageBoxW(nullptr, text.c_str(), kTitle, MB_OK | MB_ICONWARNING);
+        if (play) {
+            if (cheatsEnabled != ReadCheatsEnabled(directory) && !saveIni(L"Cheats", L"enable_cheats", cheatsEnabled ? L"1" : L"0")) {
+                MessageBoxW(nullptr, L"The Enable cheats setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
             }
-        }
-        for (size_t i = 0; play && i < kMultiplierCount; ++i) {
-            const Multiplier& multiplier = kMultipliers[i];
-            const int factor = multipliers[i];
-            const bool changed = factor == 1 ? HasCheatKey(directory, multiplier.key) : factor != ReadFactor(directory, multiplier.key);
-            const bool legacy = multiplier.legacy != nullptr && HasCheatKey(directory, multiplier.legacy);
-            // The legacy key is removed only after the new value is saved, so a failed save leaves the old setting in place.
-            if ((changed && !saveIni(L"Cheats", multiplier.key, factor == 1 ? nullptr : std::to_wstring(factor).c_str())) ||
-                (legacy && !saveIni(L"Cheats", multiplier.legacy, nullptr))) {
-                const std::wstring text = L"The " + std::wstring(multiplier.label) + L" setting could not be saved. It is used for this start only.";
-                MessageBoxW(nullptr, text.c_str(), kTitle, MB_OK | MB_ICONWARNING);
-            }
+            if (HasSetting(directory, L"enable_cheat_menu")) saveIni(L"Cheats", L"enable_cheat_menu", nullptr);
         }
         if (iniChanged) SeparateIniSections(directory + kLauncherIni);
         return play;
@@ -1250,23 +1111,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
 
-    bool cheats[kCheatCount] = {};
-    int multipliers[kMultiplierCount] = {};
     bool borderless = false;
     bool skipIntro = false;
     bool skipDialogue = false;
     bool ladderGrabWithUp = false;
     bool revealFullMap = false;
+    bool cheatsEnabled = false;
     {
         Launcher launcher;
         if (!launcher.Run(directory, gameIcon)) return 0;
-        std::copy(std::begin(launcher.cheats), std::end(launcher.cheats), cheats);
-        std::copy(std::begin(launcher.multipliers), std::end(launcher.multipliers), multipliers);
         borderless = launcher.borderless;
         skipIntro = launcher.skipIntro;
         skipDialogue = launcher.skipDialogue;
         ladderGrabWithUp = launcher.ladderGrabWithUp;
         revealFullMap = launcher.revealFullMap;
+        cheatsEnabled = launcher.cheatsEnabled;
     }
 
     const std::wstring runtime = directory + L"\\" + kRuntime;
@@ -1347,11 +1206,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     SetEnvironmentVariableW(L"SOS_SKIP_DIALOGUE", skipDialogue ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_LADDER_GRAB_WITH_UP", ladderGrabWithUp ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_REVEAL_FULL_MAP", revealFullMap ? L"1" : nullptr);
-    for (size_t i = 0; i < kCheatCount; ++i) SetEnvironmentVariableW(kCheats[i].variable, cheats[i] ? L"1" : nullptr);
-    for (size_t i = 0; i < kMultiplierCount; ++i) {
-        SetEnvironmentVariableW(kMultipliers[i].variable, multipliers[i] != 1 ? std::to_wstring(multipliers[i]).c_str() : nullptr);
-    }
-    SetEnvironmentVariableW(L"SOS_JUMP_HEIGHT", nullptr);  // the earlier Jump Height switch, which the runtime no longer reads
+    SetEnvironmentVariableW(L"SOS_CHEATS_ENABLED", cheatsEnabled ? L"1" : nullptr);
+    for (const wchar_t* variable : kLegacyCheatVariables) SetEnvironmentVariableW(variable, nullptr);
     PROCESS_INFORMATION process{};
     std::wstring command = L"\"" + runtime + L"\"";
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process)) {
