@@ -71,6 +71,7 @@ Award upgradeMaterials{"Upgrade Materials", "+10", kUpgradeMaterials, std::size(
                        kUpgradeMaterialsRunning};
 // Null while the keys work; written by whichever thread removes the wallet hook and read by the window thread.
 std::atomic<const char*> awardsUnavailable{"game code not recognised"};
+constexpr const char* kWalletStillPatched = "PlayerController.Update is still patched";
 
 // SDL scancodes
 constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kInfiniteMagicKey = 60, kDamageMultiplierKey = 61, kMovementSpeedKey = 62, kJumpHeightKey = 63,
@@ -103,6 +104,10 @@ constexpr std::uint32_t kJumpDirectionCall = 0x6fc9c7;  // in MoveStateJump.<Del
 constexpr std::uint32_t kJumpAngle = 0x6face0;
 
 constexpr std::size_t kNativeObject = 0x10;  // UnityEngine.Object.m_CachedPtr, null once destroyed
+constexpr std::uint32_t kCoreEventsTypeInfo = 0x5e32be8;  // CoreGameEventsSubsystem's TypeInfo slot, unresolved (odd) until first use
+constexpr std::size_t kStaticFields = 0xb8;               // Il2CppClass.static_fields; CoreGameEventsSubsystem.Instance is the first
+constexpr std::size_t kPlayer1State = 0xf8;               // CoreGameEventsSubsystem.player1InstanceCached
+constexpr std::size_t kStatePawn = 0x10;                  // PlayerInstanceState.pawn
 constexpr std::size_t kMaxHp = 0x38, kCurrentHp = 0x40, kGreyHp = 0x44;
 constexpr std::size_t kCurrentSpirit = 0x20, kMaxSpirit = 0x24;
 constexpr std::size_t kCurrentMana = 0x28, kMaxMana = 0x2c;
@@ -599,7 +604,7 @@ const char* Give(const Award& award, void* controller, const char** item) {
 void RemoveWalletHook() {
     const Result result = Transition(kWalletSites, std::size(kWalletSites), false, true);
     if (result == Result::Done) return;
-    awardsUnavailable.store("PlayerController.Update is still patched");
+    awardsUnavailable.store(kWalletStillPatched);
     std::fprintf(stderr, result == Result::Mismatch
                              ? "Blood Orbs and Upgrade Materials: the game's own PlayerController.Update could not be restored, keys disabled\n"
                              : "Blood Orbs and Upgrade Materials: the game was running PlayerController.Update, keys disabled\n");
@@ -638,9 +643,32 @@ void ExpireRequest(std::uint64_t now) {
     Failed(award, "no player in the game", nullptr);
 }
 
+bool playerLookupRecognised = false;
+
+enum class Presence { Absent, Present, Unknown };
+
+bool ReadPointer(std::uintptr_t address, std::uintptr_t& value) {
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), &value, sizeof(value), nullptr) != FALSE;
+}
+
+// Player 1 the way the game's own menus find it: CoreGameEventsSubsystem.Instance.player1InstanceCached.pawn, alive. This runs on the
+// window thread, which may race the game releasing any of these objects, so each read goes through ReadProcessMemory, which fails instead
+// of faulting; a failed read is Unknown, not Absent.
+Presence Player1() {
+    if (!playerLookupRecognised) return Presence::Unknown;
+    std::uintptr_t value = 0;
+    if (!ReadPointer(reinterpret_cast<std::uintptr_t>(game + kCoreEventsTypeInfo), value)) return Presence::Unknown;
+    if (value == 0 || (value & 1) != 0) return Presence::Absent;  // no code has used the subsystem, so no player was set up
+    for (const std::size_t offset : {kStaticFields, std::size_t{0}, kPlayer1State, kStatePawn, kNativeObject}) {
+        if (!ReadPointer(value + offset, value)) return Presence::Unknown;
+        if (value == 0) return Presence::Absent;
+    }
+    return Presence::Present;
+}
+
 // The one availability rule for the item actions, shared by the menu buttons and the F7/F8 keys.
 bool AwardsAvailable() {
-    return awardsUnavailable.load() == nullptr && walletAction.load() == kIdle;
+    return awardsUnavailable.load() == nullptr && walletAction.load() == kIdle && Player1() != Presence::Absent;
 }
 
 // F7 or F8: when AwardsAvailable allows it, queues its action and installs the hook that services it, so the game's own
@@ -790,7 +818,7 @@ constexpr int kDamageFactors[] = {1, 2, 4, 6};
 
 void DrawToggle(const HostMenuWidgets& ui, Cheat& cheat, const char* label) {
     bool on = cheat.active.load();
-    if (!ui.checkbox(label, &on, cheat.available)) return;
+    if (!ui.checkbox(label, &on, cheat.available, cheat.failed)) return;
     std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s clicked\n", cheat.name);
     SetToggle(cheat, on);
 }
@@ -802,15 +830,18 @@ void DrawDamage(const HostMenuWidgets& ui) {
         items[i] = FactorText(kDamageFactors[i]);
         if (kDamageFactors[i] == damageFactor.load()) index = static_cast<int>(i);
     }
-    if (!ui.combo("Damage Multiplier (F4)", &index, items, static_cast<int>(std::size(items)), damageMultiplier.available)) return;
+    if (!ui.combo("Damage Multiplier (F4)", &index, items, static_cast<int>(std::size(items)), damageMultiplier.available,
+                  damageMultiplier.failed)) {
+        return;
+    }
     std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s changed\n", damageMultiplier.name);
     SetDamageFactor(kDamageFactors[index]);
 }
 
-void DrawAward(const HostMenuWidgets& ui, Award& award, const char* label) {
+void DrawAward(const HostMenuWidgets& ui, Award& award, const char* label, bool available) {
     const char* notice = award.notice.load();
     const char* status = notice != nullptr && NowMs() < award.noticeUntil.load() ? notice : "";
-    if (!ui.statusButton(label, status, AwardsAvailable())) return;
+    if (!ui.statusButton(label, status, available, awardsUnavailable.load() == kWalletStillPatched)) return;
     std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] %s clicked\n", award.name);
     Request(award);
 }
@@ -828,8 +859,9 @@ void DrawMenu(const HostMenuWidgets& ui) {
     DrawToggle(ui, jumpHeight, "Jump Height 2x (F6)");
     ui.separator();
     ui.heading("ITEMS");
-    DrawAward(ui, bloodOrbs, "Add 1000 Blood Orbs (F7)");
-    DrawAward(ui, upgradeMaterials, "Add 10 Upgrade Materials (F8)");
+    const bool awardsAvailable = AwardsAvailable();
+    DrawAward(ui, bloodOrbs, "Add 1000 Blood Orbs (F7)", awardsAvailable);
+    DrawAward(ui, upgradeMaterials, "Add 10 Upgrade Materials (F8)", awardsAvailable);
 }
 
 // Once per presented frame on the window thread, so a queued wallet action that no player takes in time is given up and its hook removed.
@@ -874,6 +906,9 @@ bool StartCheats() {
     const bool awardsReady = fits && Hash({{0x32fac0, 0x32fae0}, {0x5d12d0, 0x5d1390}, {0x5d35c0, 0x5d35d0}, {0x8c0810, 0x8c0950},
         {0x8c91b0, 0x8c92b0}, {0x8ce0f0, 0x8ce6d0}, {0x996d20, 0x996e70}, {0x9971b0, 0x997390}, {0xd11230, 0xd11300}}) == 0xdcbbc10a00bb8f1e &&
         PrepareHook(walletSite, 1, ControllerFilter);
+    // Read only, never patched: Menu.GetPlayerGameobject, CoreGameEventsSubsystem.OnPlayerFinishedSetup and PlayerController.OnTakeControl
+    // hold every offset Player1 reads.
+    playerLookupRecognised = fits && Hash({{0x98b080, 0x98b170}, {0xcfeae0, 0xcfeba0}, {0x5d1de0, 0x5d1f60}}) == 0xe289ea042f4d786c;
     const bool movementReady = fits && Hash({{0x706620, 0x706b50}, {0x6ecf20, 0x6ed280}, {0x6f02e0, 0x6f06d0}, {0x708d70, 0x709360},
         {0x80ecd0, 0x80f0b0}}) == 0xe4fb67f213ff4921 && PrepareInputDelta();
     const bool jumpReady = fits && Hash({{0x6fc450, 0x6fcbf0}, {0x6face0, 0x6fb1b0}, {0x6efe80, 0x6f0180}, {0x6f0810, 0x6f08e0},
@@ -888,7 +923,7 @@ bool StartCheats() {
     if (const char* const unavailable = awardsUnavailable.load()) {
         std::fprintf(stderr, "Blood Orbs and Upgrade Materials: unavailable (%s)\n", unavailable);
     } else {
-        std::fprintf(stderr, "Blood Orbs and Upgrade Materials: ready\n");
+        std::fprintf(stderr, "Blood Orbs and Upgrade Materials: ready%s\n", playerLookupRecognised ? "" : " (player check not recognised)");
     }
     Start(movementSpeed, movementReady, &inputDeltaSite);
     Start(jumpHeight, jumpReady, &jumpDirectionSite);

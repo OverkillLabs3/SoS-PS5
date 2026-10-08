@@ -22,6 +22,8 @@ constexpr std::uint32_t kDescriptorPoolSize = 16;
 // The backend rotates its vertex buffers over this many frames, so it must exceed the presentations allowed in flight.
 constexpr std::uint32_t kVertexBufferRing = 3;
 constexpr ImVec4 kHeadingColor{1.00f, 0.82f, 0.30f, 1.00f};
+constexpr ImVec4 kFailedColor{1.00f, 0.38f, 0.28f, 1.00f};
+constexpr const char* kFailedText = "FAILED";
 
 void ApplyStyle(float scale) {
     ImGuiStyle& style = ImGui::GetStyle();
@@ -77,34 +79,68 @@ void Separator() {
     ImGui::Separator();
 }
 
-bool Checkbox(const char* label, bool* value, bool enabled) {
-    ImGui::BeginDisabled(!enabled);
-    const bool changed = ImGui::Checkbox(label, value);
-    ImGui::EndDisabled();
-    return changed;
-}
-
-bool Combo(const char* label, int* index, const char* const* items, int count, bool enabled) {
-    const float width = ImGui::GetFontSize() * kComboWidthEm;
-    ImGui::BeginDisabled(!enabled);
-    ImGui::TextUnformatted(label);
+// FAILED in red at the right end of the row: a button while a retry can be made, plain text once it cannot.
+bool FailedMark(float width, bool retry) {
     ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - width);
+    ImGui::PushStyleColor(ImGuiCol_Text, kFailedColor);
+    bool clicked = false;
+    if (retry) {
+        clicked = ImGui::Button(kFailedText, ImVec2(width, 0.0f));
+    } else {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (width - ImGui::CalcTextSize(kFailedText).x) * 0.5f);
+        ImGui::TextUnformatted(kFailedText);
+    }
+    ImGui::PopStyleColor();
+    return clicked;
+}
+
+bool Checkbox(const char* label, bool* value, bool enabled, bool failed) {
+    if (!failed) {
+        ImGui::BeginDisabled(!enabled);
+        const bool changed = ImGui::Checkbox(label, value);
+        ImGui::EndDisabled();
+        return changed;
+    }
+    // No box, so the row cannot read as off; the label keeps the place it has next to one.
     ImGui::PushID(label);
-    ImGui::SetNextItemWidth(width);
-    const bool changed = ImGui::Combo("##value", index, items, count);
+    ImGui::AlignTextToFramePadding();
+    ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextUnformatted(label);
+    const bool retried = FailedMark(ImGui::CalcTextSize(kFailedText).x + 2.0f * ImGui::GetStyle().FramePadding.x, enabled);
     ImGui::PopID();
-    ImGui::EndDisabled();
+    return retried;
+}
+
+bool Combo(const char* label, int* index, const char* const* items, int count, bool enabled, bool failed) {
+    const float width = ImGui::GetFontSize() * kComboWidthEm;
+    ImGui::PushID(label);
+    bool changed = false;
+    if (failed) {
+        ImGui::TextUnformatted(label);
+        changed = FailedMark(width, enabled);
+    } else {
+        ImGui::BeginDisabled(!enabled);
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - width);
+        ImGui::SetNextItemWidth(width);
+        changed = ImGui::Combo("##value", index, items, count);
+        ImGui::EndDisabled();
+    }
+    ImGui::PopID();
     return changed;
 }
 
-bool StatusButton(const char* label, const char* status, bool enabled) {
+bool StatusButton(const char* label, const char* status, bool enabled, bool failed) {
     const float statusWidth = ImGui::GetFontSize() * kStatusWidthEm;
     const float buttonWidth = ImGui::GetContentRegionAvail().x - statusWidth - ImGui::GetStyle().ItemSpacing.x;
     ImGui::BeginDisabled(!enabled);
     const bool clicked = ImGui::Button(label, ImVec2(buttonWidth, 0.0f));
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::TextUnformatted(status);
+    if (failed) ImGui::PushStyleColor(ImGuiCol_Text, kFailedColor);
+    ImGui::TextUnformatted(failed ? kFailedText : status);
+    if (failed) ImGui::PopStyleColor();
     return clicked;
 }
 
@@ -195,7 +231,7 @@ void ImGuiOverlay::drawMenu() {
         HostMenuDraw_nid_no_patch(kWidgets);
         Separator();
         Heading("OVERLAY");
-        if (Checkbox("Show FPS", &framesPerSecondShown, true)) {
+        if (Checkbox("Show FPS", &framesPerSecondShown, true, false)) {
             std::fprintf(stderr, "[DEBUG_SAULO][InGameMenu] Show FPS %s\n", framesPerSecondShown ? "on" : "off");
         }
     }

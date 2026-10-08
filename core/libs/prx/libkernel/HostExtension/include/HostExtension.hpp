@@ -12,9 +12,10 @@ using HostFrameTick = void (*)();
 struct HostMenuWidgets {
     void (*heading)(const char* text);
     void (*separator)();
-    bool (*checkbox)(const char* label, bool* value, bool enabled);
-    bool (*combo)(const char* label, int* index, const char* const* items, int count, bool enabled);
-    bool (*statusButton)(const char* label, const char* status, bool enabled);
+    // failed: a patch behind the control could not be restored, so it is neither on nor off and shows FAILED.
+    bool (*checkbox)(const char* label, bool* value, bool enabled, bool failed);
+    bool (*combo)(const char* label, int* index, const char* const* items, int count, bool enabled, bool failed);
+    bool (*statusButton)(const char* label, const char* status, bool enabled, bool failed);
 };
 using HostMenuDraw = void (*)(const HostMenuWidgets& widgets);
 
