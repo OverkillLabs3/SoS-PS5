@@ -111,6 +111,7 @@ public:
         double gpuBusyMs, gpuGapMs, lastSubmitAfterFlipMs, blitSubmitAfterFlipMs;
     };
     static PresentStatistics PresentCounts();
+    std::uint32_t PhysicalVendorId() const;
 
     std::shared_ptr<PreparedDispatch> PrepareDispatch(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots);
 
@@ -171,6 +172,9 @@ private:
     std::unique_ptr<State> state;
     std::uint64_t serial;
 };
+
+// Unloads the Vulkan loaders of devices destroyed while GpuMutex was held; call it after releasing GpuMutex.
+void ReleaseDeferredVulkanLoaders();
 
 }
 

@@ -13,6 +13,8 @@
 namespace AgcDriver::Graphics {
 
 void ShutdownGuestBufferWorkers();
+void ClearImageMirrors(VkDevice device);
+void ClearHostImports(VkDevice device);
 
 struct GuestMemorySnapshot {
     std::uint64_t address;

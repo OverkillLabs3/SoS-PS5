@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/NvidiaShutdownPin.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WorkerSampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
@@ -40,10 +41,13 @@ void Driver::stop() {
         if (worker.thread.joinable()) worker.thread.join();
     }
     StopWorkerSampler();
-    std::lock_guard gpuLock(GuestMemory::GpuMutex());
+    if (const auto current = device.Load()) PinD3D12RuntimeForNvidiaShutdown(current->PhysicalVendorId());
+    std::unique_lock gpuLock(GuestMemory::GpuMutex());
     device.Reset();
     replacedDevices.clear();
     Graphics::ShutdownGuestBufferWorkers();
+    gpuLock.unlock();
+    ReleaseDeferredVulkanLoaders();
     stopped = true;
 }
 
