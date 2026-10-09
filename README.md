@@ -7,7 +7,7 @@ Made possible by the [AnyPS5](https://github.com/boykopovar/AnyPS5) project. The
 ![God of War: Sons of Sparta running on Windows at 60 FPS](screenshot.jpg)
 
 ## How to play
-1. Download `SonsOfSparta-PS5-Native-0.1.0-win64.zip` and extract it anywhere.
+1. Download `SonsOfSparta-PS5-Native-0.4.1-win64.zip` and extract it anywhere.
 2. Copy **your own** decrypted game files into the same folder as `SonsOfSparta-PS5.exe`:
    `eboot.bin` (or a decrypted `eboot.elf`), `sce_sys`, `sce_module` and `Media`.
 3. Double-click `SonsOfSparta-PS5.exe`, check the settings and press **Play**.
@@ -19,7 +19,7 @@ Closing the game window ends it within a few seconds. Logs are in the `logs` fol
 ## Highlights
 - The game's own x86-64 code runs directly on your CPU, with no CPU emulation. The PS5 system libraries and GPU commands are reimplemented through a compatibility layer, similar to Wine and DXVK
 - Playable from the logo through gameplay, with music and sound effects
-- About 60 FPS in menus and gameplay on our test PC (RTX 5070 Ti)
+- About 60 FPS in menus and gameplay on our test PC (RTX 5070 Ti), with optional 120 FPS and unlocked frame rate in the launcher
 - Keyboard and any XInput/DualSense/DualShock gamepad; saves are kept next to the game
 
 ## Controls
@@ -59,7 +59,6 @@ If you created `resolution.txt` with an earlier version, its value is preselecte
 
 ## Known issues
 - **First play builds shaders:** the first time you play, shaders are built while you play, so you may see visual glitches (missing or wrong-looking effects, brief stutters) until they are cached. This gets better on later runs.
-- The intro video sometimes shows a dark frozen picture for about 10s, then continues to the menu by itself.
 - Rare crashes or freezes can still happen, mostly during the intro or loading. Just start the game again.
 - The whole game has not been completed, so not all of it is tested. Later areas may have missing graphics, audio problems or crashes.
 - Tested on an NVIDIA graphics card only. AMD and Intel are untested.
@@ -75,16 +74,16 @@ If you created `resolution.txt` with an earlier version, its value is preselecte
 You need Windows 10/11, MinGW-w64 GCC 15.2 (winlibs, `x86_64-ucrt-posix-seh`), CMake 3.20 or newer, Ninja and Git. `g++`, `cmake` and `ninja` must be on your `PATH`.
 
 ```
-git clone --recursive https://github.com/OverkillLabs2/SoS-PS5.git
+git clone --recursive https://github.com/OverkillLabs3/SoS-PS5.git
 cd SoS-PS5
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target libs relinker SonsOfSparta-PS5
-powershell -ExecutionPolicy Bypass -File tools\package.ps1
+powershell -ExecutionPolicy Bypass -File tools\package.ps1 -Version 0.4.1
 ```
 
 The first configure downloads prebuilt FFmpeg libraries from GitHub, so it needs internet access. The first build takes a while.
 
-The result is `release\SonsOfSparta-PS5-Native-0.1.0-win64`, the same layout as the download. Copy your own game files next to `SonsOfSparta-PS5.exe` as described above.
+The result is `release\SonsOfSparta-PS5-Native-0.4.1-win64`, the same layout as the download. Copy your own game files next to `SonsOfSparta-PS5.exe` as described above.
 
 ## License
 
