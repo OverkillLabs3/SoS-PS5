@@ -576,16 +576,26 @@ void BuildTrampoline(std::uint8_t* at, const Site& site) {
     std::memcpy(at + used + sizeof(jumpBack), &resume, sizeof(resume));
 }
 
-bool Patch(const Site& site, const std::uint8_t* trampoline) {
+bool Patch(const Site& site, const std::uint8_t* trampoline, std::uint8_t* original) {
     auto* method = reinterpret_cast<std::uint8_t*>(game + site.begin);
     std::uint8_t jump[kEntryJump] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0};
     std::memcpy(jump + 2, &trampoline, sizeof(trampoline));
     DWORD protection = 0;
     if (!VirtualProtect(method, sizeof(jump), PAGE_EXECUTE_READWRITE, &protection)) return false;
+    std::memcpy(original, method, sizeof(jump));
     std::memcpy(method, jump, sizeof(jump));
     VirtualProtect(method, sizeof(jump), protection, &protection);
     FlushInstructionCache(GetCurrentProcess(), method, sizeof(jump));
     return true;
+}
+
+void Unpatch(const Site& site, const std::uint8_t* original) {
+    auto* method = reinterpret_cast<std::uint8_t*>(game + site.begin);
+    DWORD protection = 0;
+    if (!VirtualProtect(method, kEntryJump, PAGE_EXECUTE_READWRITE, &protection)) return;
+    std::memcpy(method, original, kEntryJump);
+    VirtualProtect(method, kEntryJump, protection, &protection);
+    FlushInstructionCache(GetCurrentProcess(), method, kEntryJump);
 }
 
 // Only the analysed game build is patched: Skip dialogue stays off unless every method it uses is recognised, and the cutscene
@@ -620,11 +630,21 @@ bool StartSkipDialogue() {
     if (block != nullptr) FlushInstructionCache(GetCurrentProcess(), block, blockSize);
     bool skipInstalled = skipRecognised && executable;
     bool sceneInstalled = skipInstalled && sceneRecognised;
+    std::uint8_t originals[count][kEntryJump] = {};
+    bool applied[count] = {};
     for (std::size_t index = 0; index < count; ++index) {
         const Site& site = kSites[index];
-        if (!(site.use == Use::Skip ? skipInstalled : sceneInstalled) || Patch(site, block + index * kTrampolineSlot)) continue;
+        if (!(site.use == Use::Skip ? skipInstalled : sceneInstalled)) continue;
+        if (Patch(site, block + index * kTrampolineSlot, originals[index])) {
+            applied[index] = true;
+            continue;
+        }
         if (site.use == Use::Skip) skipInstalled = false;
         sceneInstalled = false;
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        const Site& site = kSites[index];
+        if (applied[index] && !(site.use == Use::Skip ? skipInstalled : sceneInstalled)) Unpatch(site, originals[index]);
     }
     skipAvailable = skipInstalled;
     sceneAvailable = skipInstalled && sceneInstalled;

@@ -91,6 +91,7 @@ public:
     void* Window() const;
     void Resize(std::uint32_t width, std::uint32_t height);
     bool Presentable() const;
+    void SetPresentationOverlay(PresentationOverlay* overlay);
     bool PrimitiveListRestart() const;
 
     static std::size_t FlipInFlight();

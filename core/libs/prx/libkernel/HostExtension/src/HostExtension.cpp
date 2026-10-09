@@ -4,25 +4,32 @@
 namespace {
 
 std::atomic<HostKeyHandler> registeredKeyHandler{nullptr};
-std::atomic<HostTitleStatus> registeredTitleStatus{nullptr};
+std::atomic<HostFrameTick> registeredFrameTick{nullptr};
+std::atomic<HostMenuDraw> registeredMenuDraw{nullptr};
 
 }
 
 extern "C" {
 
-void HostExtensionRegister_nid_no_patch(HostKeyHandler keyHandler, HostTitleStatus titleStatus) {
+void HostExtensionRegister_nid_no_patch(HostKeyHandler keyHandler, HostFrameTick frameTick) {
     registeredKeyHandler.store(keyHandler);
-    registeredTitleStatus.store(titleStatus);
+    registeredFrameTick.store(frameTick);
 }
 
 void HostKeyPressed_nid_no_patch(int scancode) {
     if (const auto handler = registeredKeyHandler.load()) handler(scancode);
 }
 
-void HostTitleStatus_nid_no_patch(char* text, std::size_t size) {
-    if (size == 0) return;
-    text[0] = '\0';
-    if (const auto status = registeredTitleStatus.load()) status(text, size);
+void HostFrameTick_nid_no_patch() {
+    if (const auto tick = registeredFrameTick.load()) tick();
+}
+
+void HostExtensionRegisterMenu_nid_no_patch(HostMenuDraw draw) {
+    registeredMenuDraw.store(draw);
+}
+
+void HostMenuDraw_nid_no_patch(const HostMenuWidgets& widgets) {
+    if (const auto draw = registeredMenuDraw.load()) draw(widgets);
 }
 
 }

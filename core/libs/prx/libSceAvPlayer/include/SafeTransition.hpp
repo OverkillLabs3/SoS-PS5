@@ -4,7 +4,7 @@
 #include <mutex>
 #include <string>
 
-// Serializes AvPlayer source opening while Movement Speed 2x or Jump Height 2x is on. libSceSystemService sets the state through a
+// Serializes AvPlayer source opening while Movement Speed 2x or Jump Height is on. libSceSystemService sets the state through a
 // process-local named event, so neither library links to the other.
 namespace SafeTransition {
 

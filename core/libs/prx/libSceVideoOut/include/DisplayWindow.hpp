@@ -21,9 +21,10 @@ public:
     SDL_Window* Handle() const;
     void DrawableSize(std::uint32_t& width, std::uint32_t& height) const;
     void UpdateTitle();
+    double FramesPerSecond() const;
     void ToggleFullscreen();
     void HandleEvent(const SDL_Event& event);
-    void UpdateCursor();
+    void UpdateCursor(bool keepVisible);
 
 private:
     void create(std::uint32_t sourceWidth, std::uint32_t sourceHeight);
@@ -39,6 +40,7 @@ private:
     std::uint32_t aspectHeight = 0;
     std::uint64_t lastMouseMotion = 0;
     bool cursorHidden = false;
+    double framesPerSecond = 0.0;
 };
 
 #endif
