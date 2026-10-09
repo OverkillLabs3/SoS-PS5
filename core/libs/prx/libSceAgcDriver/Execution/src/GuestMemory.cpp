@@ -418,6 +418,18 @@ void ForgetPages(std::uintptr_t address, std::size_t bytes) {
 void PageStates::initialize() {
     std::call_once(once, [&] {
         GuestArena::GuestArenaRange_nid_postfix(&arena.base, &arena.size);
+#ifndef _WIN32
+        // On Linux the guest window is reserved by libkernel's low arena, and the GuestArena
+        // span in libc is a Windows-only construct, so the range above comes back empty here.
+        // Without a span to cache into, every guest-memory validation re-reads and re-parses
+        // /proc/self/maps, which measured 50.8% of CPU while a title was playing.
+        if (arena.size == 0) {
+            constexpr std::uintptr_t LowWindowStart = 0x200000000;
+            constexpr std::size_t LowWindowSize = 0x400000000;
+            arena.base = LowWindowStart;
+            arena.size = LowWindowSize;
+        }
+#endif
         const bool arenaCached = arena.allocate();
         bool imageCached = false;
 #ifdef _WIN32
@@ -512,8 +524,22 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
             std::string permissions;
             if (!(fields >> std::hex >> first >> separator >> last >> permissions) || separator != '-' || first >= last || permissions.size() < 2) return false;
             if (last <= cursor || first > cursor) continue;
+            const bool readable = permissions[0] == 'r';
+            const bool writable = readable && permissions[1] == 'w';
+            if (readable) {
+                const auto generation = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+                for (PageSpan* span : {&pages.arena, &pages.image}) {
+                    if (span->size == 0) continue;
+                    const auto from = std::max(cursor, span->base);
+                    const auto to = std::min(last, span->base + span->size);
+                    if (to <= from) continue;
+                    const std::uint8_t value = PageReadable | (writable ? PageWritable : 0u);
+                    for (auto at = from; at < to; at += PageBytes) span->store(at, value);
+                    if (GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) span->forget(from, to - from);
+                }
+            }
             const auto next = std::min(end, last);
-            if (!emit(PageRun{cursor, next, permissions[0] == 'r', permissions[0] == 'r' && permissions[1] == 'w'})) return true;
+            if (!emit(PageRun{cursor, next, readable, writable})) return true;
             cursor = next;
             found = true;
             break;

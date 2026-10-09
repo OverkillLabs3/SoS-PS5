@@ -473,10 +473,16 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
     const size_t prefix = (alignment - (raw & (alignment - 1))) & (alignment - 1);
     void* aligned = reinterpret_cast<void*>(raw + prefix);
     const size_t suffix = allocLen - prefix - len;
+    if (prefix != 0) {
+        GuestAllocations::GuestAllocationsInvalidate_nid_postfix(reinterpret_cast<std::uintptr_t>(result), prefix);
+    }
     if (prefix != 0 && munmap(result, prefix) != 0) {
         const int error = errno;
         Unmap(result, allocLen);
         throw std::system_error(error, std::generic_category(), "Mapping prefix munmap failed");
+    }
+    if (suffix != 0) {
+        GuestAllocations::GuestAllocationsInvalidate_nid_postfix(reinterpret_cast<std::uintptr_t>(raw + prefix + len), suffix);
     }
     if (suffix != 0 && munmap(reinterpret_cast<void*>(raw + prefix + len), suffix) != 0) {
         const int error = errno;
