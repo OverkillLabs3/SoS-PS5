@@ -98,7 +98,7 @@ std::uint32_t remapGuestFormat(std::uint32_t guestFormat) {
 const FormatEntry& findFormatEntry(std::uint32_t guestFormat) {
     const auto remapped = remapGuestFormat(guestFormat);
     const auto* entry = remapped <= kMaxGuestFormat ? kFormatLookupTable[remapped] : nullptr;
-    Require(entry != nullptr, "unsupported guest texture format " + std::to_string(guestFormat));
+    if (entry == nullptr) Require(false, "unsupported guest texture format " + std::to_string(guestFormat));
     return *entry;
 }
 

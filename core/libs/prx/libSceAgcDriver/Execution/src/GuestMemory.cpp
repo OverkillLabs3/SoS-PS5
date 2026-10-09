@@ -26,6 +26,7 @@
 #include <windows.h>
 #else
 #include <fstream>
+#include <pthread.h>
 #include <sstream>
 #endif
 
@@ -526,8 +527,39 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
     return true;
 }
 
+bool onOwnLiveStack(std::uintptr_t address, std::size_t bytes) {
+    struct Bounds {
+        std::uintptr_t low = 0;
+        std::uintptr_t high = 0;
+        Bounds() {
+#ifdef _WIN32
+            ULONG_PTR lowLimit = 0;
+            ULONG_PTR highLimit = 0;
+            GetCurrentThreadStackLimits(&lowLimit, &highLimit);
+            low = static_cast<std::uintptr_t>(lowLimit);
+            high = static_cast<std::uintptr_t>(highLimit);
+#else
+            pthread_attr_t attributes;
+            if (pthread_getattr_np(pthread_self(), &attributes) != 0) return;
+            void* base = nullptr;
+            std::size_t size = 0;
+            if (pthread_attr_getstack(&attributes, &base, &size) == 0 && base != nullptr) {
+                low = reinterpret_cast<std::uintptr_t>(base);
+                high = low + size;
+            }
+            pthread_attr_destroy(&attributes);
+#endif
+        }
+    };
+    thread_local const Bounds bounds;
+    const volatile unsigned char marker = 0;
+    const auto frame = reinterpret_cast<std::uintptr_t>(&marker);
+    return bounds.high != 0 && frame >= bounds.low && frame < bounds.high && address >= frame && address < bounds.high && bytes <= bounds.high - address;
+}
+
 std::string verify(std::uintptr_t address, std::size_t bytes, bool writable) {
     const TimedAccess timed(CounterVerify, bytes);
+    if (onOwnLiveStack(address, bytes)) return {};
     std::string reason;
     const bool queried = describePages(address, bytes, [&](const PageRun& run) {
         if (!run.readable) {

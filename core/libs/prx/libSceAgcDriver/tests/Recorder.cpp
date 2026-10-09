@@ -392,6 +392,38 @@ void lateLabelTests(Recorder& recorder) {
     Require(!Recorder::LookupLabel(a, 4, 5).has_value() && !Recorder::LookupLabel(b, 8, 5).has_value() && !recorder.PendingLabelIn(0x70000, 0x400), "(7) entries outlived their batch");
 }
 
+void largeLabelTests(Recorder& recorder) {
+    constexpr std::uint64_t slot = 0x71000, small = slot + 0x10, outside = slot - 4, wide = 0x72000;
+    const std::array<std::byte, 4> one{std::byte{1}, std::byte{0}, std::byte{0}, std::byte{0}};
+    std::array<std::byte, 256> clear{};
+    std::array<std::byte, Recorder::LabelTableBytes> limit{};
+    limit.fill(std::byte{3});
+    recorder.Sync();
+    Require(recorder.PendingLabels() == 0 && !Recorder::PendingLabelSince().has_value() && !Recorder::WideLabelIn(0, ~0ull), "the table is not empty before the large label tests");
+    recorder.NoteLabel(small, one, 100, 0);
+    recorder.NoteLabel(outside, one, 100, 0);
+    Recorder::CloseLabelGroup(AgcDriver::GuestMemory::TrackerGeneration());
+    Require(recorder.PendingLabels() == 2 && Recorder::LookupLabel(small, 4, 50).has_value(), "4-byte labels did not enter the table");
+    recorder.NoteLabel(slot, clear, 101, 0);
+    Recorder::CloseLabelGroup(AgcDriver::GuestMemory::TrackerGeneration());
+    Require(recorder.PendingLabels() == 1 && Recorder::LookupLabel(outside, 4, 50).has_value(), "a label larger than the table bound entered dwords or removed one outside its range");
+    Require(!Recorder::LookupLabel(small, 4, 50).has_value() && !Recorder::LookupLabel(slot, 8, 0).has_value(), "an older label under a larger one still composes the value");
+    Require(Recorder::WideLabelIn(slot, 4) && Recorder::WideLabelIn(slot + clear.size() - 4, 4) && Recorder::WideLabelIn(slot - 0x100, 0x104) && !Recorder::WideLabelIn(slot - 0x100, 0x100) && !Recorder::WideLabelIn(slot + clear.size(), 4), "a large label's range is wrong");
+    Require(recorder.PendingLabelIn(slot + 0x20, 0x20) && recorder.PendingWriteOverlaps(slot, clear.size()), "a large label is not pending");
+    Require(Recorder::PendingLabelSince().has_value(), "a large label did not start the label flush deadline");
+    recorder.NoteLabel(small, one, 102, 0);
+    Recorder::CloseLabelGroup(AgcDriver::GuestMemory::TrackerGeneration());
+    const auto later = Recorder::LookupLabel(small, 4, 101);
+    Require(later.has_value() && later->value == 1 && later->stamp == 102, "a label after a large one is not served");
+    recorder.NoteLabel(wide, limit, 103, 0);
+    Recorder::CloseLabelGroup(AgcDriver::GuestMemory::TrackerGeneration());
+    Require(recorder.PendingLabels() == 2 + Recorder::LabelTableBytes / 4 && !Recorder::WideLabelIn(wide, limit.size()), "a label at the table bound did not enter every dword");
+    const auto bound = Recorder::LookupLabel(wide + Recorder::LabelTableBytes - 8, 8, 0);
+    Require(bound.has_value() && bound->value == 0x0303030303030303ull && bound->stamp == 103, "a label at the table bound is not served");
+    recorder.Sync();
+    Require(recorder.PendingLabels() == 0 && !Recorder::WideLabelIn(0, ~0ull) && !recorder.PendingLabelIn(slot, clear.size()) && !recorder.PendingWriteOverlaps(slot, clear.size()), "large label tests left entries, ranges or writes behind");
+}
+
 void unchangedSinceTests() {
     using namespace AgcDriver::GuestMemory;
     static std::uint32_t outside[16];
@@ -815,6 +847,93 @@ void resourceReadTests(const Device& device, Recorder& recorder) {
     }
 
     HostImportFor(context, address, bytes);
+}
+
+void misalignedRegionTests(const Device& device, Recorder& recorder) {
+    const auto& context = device.GetContext();
+    const auto alignment = context.limits.minStorageBufferOffsetAlignment;
+    constexpr std::size_t bytes = 65536;
+    if (alignment < 8 || alignment > 256) {
+        std::cout << "storage buffer offset alignment " << alignment << ": misaligned draw regions not tested\n";
+        return;
+    }
+    void* block = context.hostImportAlignment != 0 ? AllocateWatched(bytes, 65536) : nullptr;
+    if (block == nullptr) {
+        std::cout << "host imports or write watching unavailable: misaligned draw regions not tested\n";
+        return;
+    }
+    struct Release {
+        void* block;
+        ~Release() { ReleaseWatched(block, bytes); }
+    } release{block};
+    auto* guest = static_cast<std::uint8_t*>(block);
+    for (std::size_t at = 0; at < bytes; ++at) guest[at] = static_cast<std::uint8_t>(at * 5u + 1u);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        ~Unregister() {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, reinterpret_cast<std::uint64_t>(block), bytes);
+        }
+    } unregister{context, block};
+    const auto* import = HostImportFor(context, address, bytes);
+    if (import == nullptr) {
+        std::cout << "host import of the watched block refused: misaligned draw regions not tested\n";
+        return;
+    }
+    constexpr std::uint32_t offset = 4096 + 4;
+    constexpr std::size_t elementBytes = 64;
+    const auto view = address + offset;
+    Require((view - import->base) % alignment != 0 && (view - import->base) % 4 == 0, "the test view is not a DWORD-aligned view off the storage buffer offset alignment");
+    ShaderRecompiler::RecompileResult vertex;
+    ShaderRecompiler::DescriptorBinding binding;
+    binding.kind = ShaderRecompiler::DescriptorKind::StorageBuffer;
+    binding.role = ShaderRecompiler::DescriptorRole::GuestBuffers;
+    binding.descriptorSet = 0;
+    binding.binding = 0;
+    binding.count = 1;
+    binding.guestDescriptor = {static_cast<std::uint32_t>(view), static_cast<std::uint32_t>(view >> 32u) & 0xffffu, static_cast<std::uint32_t>(elementBytes), 0x31000000u};
+    binding.bufferWritten = {false};
+    vertex.bindings.push_back(binding);
+    vertex.pushConstants.resize(16);
+    vertex.memoryOffsetDword = 0;
+    const ShaderRecompiler::RecompileResult fragment;
+    {
+        auto regionContext = context;
+        DescriptorCache cache(regionContext);
+        regionContext.descriptorCache = &cache;
+        Recorder regionRecorder(regionContext);
+        regionRecorder.Activate();
+        const ColorTarget target{};
+        ShaderResources resources(regionContext, vertex, fragment, target, 0, 0);
+        Require(resources.Reusable(), "a misaligned read-only draw region bound in place is not reusable");
+        const auto reads = resources.InPlaceReads();
+        Require(reads.size() == 1 && reads.front().first == view && reads.front().second == view + elementBytes, "the misaligned draw region is not read in place");
+        std::array<std::byte, PipelinePushConstantBytes> push{};
+        resources.PatchPushConstants(push);
+        const auto adjustment = static_cast<std::uint32_t>(push[0]);
+        Require(adjustment == (view - import->base) % alignment, "the misaligned region's push constant offset is not its distance from the aligned binding offset");
+        const auto check = [&] {
+            const auto bindings = resources.PrepareDrawBindings(regionRecorder);
+            Require(bindings != nullptr && bindings->snapshots.size() == 1, "the read-only misaligned draw input was not snapshotted");
+            const auto contents = bindings->snapshots.front().buffer->Bytes();
+            Require(bindings->snapshots.front().address == view - adjustment && contents.size() == adjustment + elementBytes, "the draw snapshot does not start at the aligned offset below the view");
+            Require(std::memcmp(contents.data() + adjustment, guest + offset, elementBytes) == 0, "the shader's patched offset into the draw snapshot misses the view's bytes");
+        };
+        check();
+        guest[offset + 8] ^= 0xffu;
+        check();
+        regionRecorder.Sync();
+    }
+    recorder.Activate();
 }
 
 void misalignedSnapshotTests(const Device& device, Recorder& recorder) {
@@ -1762,6 +1881,61 @@ void importWindowTests(const Device& device, Recorder& recorder) {
 #endif
 }
 
+void pendingKeyStoreTests(const Device& device, Recorder& recorder) {
+    const auto& context = device.GetContext();
+    if (context.hostImportAlignment == 0) {
+        std::cout << "host imports unavailable: pending key stores not tested\n";
+        return;
+    }
+    constexpr std::size_t surfaceBytes = 65536;
+    constexpr std::size_t keyCount = surfaceBytes / 256;
+    constexpr std::size_t bytes = 65536;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the pending key store block");
+    auto* keys = static_cast<std::uint8_t*>(block);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        std::uint64_t address;
+        ~Unregister() {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, address, bytes);
+        }
+    } unregister{context, block, address};
+    if (HostImportFor(context, address, bytes) == nullptr) {
+        std::cout << "host import of the pending key store block refused: pending key stores not tested\n";
+        return;
+    }
+    recorder.Sync();
+    std::memset(keys, 0x00, keyCount);
+    MarkDccUncompressed(context, address, surfaceBytes);
+    Require(recorder.PendingWriteOverlaps(address, keyCount) && keys[0] == 0x00, "the uncompressed key store did not stay pending");
+    Require(CurrentDccKeys(address, surfaceBytes) == DccKeys::Uncompressed, "the keys after a pending uncompressed store do not read as uncompressed");
+    Require(recorder.PendingWriteOverlaps(address, keyCount), "reading keys the driver's own pending store wrote waited for the GPU");
+    Require(CurrentDccKeys(address + 16, surfaceBytes / 2) == DccKeys::Uncompressed, "a key range inside the pending store does not read as uncompressed");
+    recorder.NotePendingWrite(address + 16, 16);
+    Require(CurrentDccKeys(address, surfaceBytes) == DccKeys::Uncompressed && !recorder.PendingWriteOverlaps(address, keyCount), "a key read with a later writer over the pending store did not wait for it");
+    Require(std::all_of(keys, keys + keyCount, [](std::uint8_t key) { return key == 0xff; }), "the uncompressed key store did not land");
+    recorder.NotePendingWrite(address, keyCount);
+    NoteKeysFillOnGpu(address, keyCount, DccKeys::Clear0001);
+    Require(CurrentDccKeys(address, surfaceBytes) == DccKeys::Clear0001 && recorder.PendingWriteOverlaps(address, keyCount), "the keys of a pending fill did not read as its keys without a wait");
+    recorder.NotePendingWrite(address, 2 * keyCount);
+    Require(CurrentDccKeys(address, surfaceBytes) == DccKeys::Uncompressed && !recorder.PendingWriteOverlaps(address, keyCount), "a later wider writer over a pending fill was not waited for");
+    recorder.Sync();
+}
+
 void metadataPassTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -2253,11 +2427,13 @@ int main() {
         batchStampTests(recorder);
         labelTests(recorder);
         lateLabelTests(recorder);
+        largeLabelTests(recorder);
         unchangedSinceTests();
         closeRaceTests(device, recorder);
         keyProofTests(device, recorder);
         resourceReadTests(device, recorder);
         misalignedSnapshotTests(device, recorder);
+        misalignedRegionTests(device, recorder);
         drawSnapshotReuseTests(device, recorder);
         drawSnapshotEvictionTests(device);
         drawInputReuseTests(device, recorder);
@@ -2275,6 +2451,7 @@ int main() {
         minLodTests(device, recorder);
         firstLayerViewTests(device, recorder);
         metadataPassTests(device, recorder);
+        pendingKeyStoreTests(device, recorder);
         std::cout << "Recorder read tracking and label tests passed\n";
         return 0;
     } catch (const std::exception& error) {

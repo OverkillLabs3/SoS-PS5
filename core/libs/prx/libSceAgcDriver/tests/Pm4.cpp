@@ -102,6 +102,29 @@ void testRegisters() {
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x9f, {0, 0, 0x80000000, 0}), 0x20); }, "compute");
 }
 
+void testRegisterFile() {
+    AgcDriver::Registers registers{{0x300, 3}, {0x10, 1}, {0x41, 2}};
+    check(registers.size() == 3 && !registers.contains(0x11) && registers.at(0x41) == 2, "register file lookup");
+    check(registers.find(0x12) == registers.end() && registers.find(0x10)->second == 1, "register file find");
+    check(!registers.emplace(0x10, 9).second && registers.at(0x10) == 1, "register file emplace replaced a value");
+    check(registers.insert_or_assign(0x10, 7).second == false && registers.at(0x10) == 7, "register file assignment");
+    check(registers.lower_bound(0x11)->first == 0x41 && registers.upper_bound(0x41)->first == 0x300 && registers.lower_bound(0x301) == registers.end(), "register file bounds");
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> order;
+    for (const auto& [offset, value] : registers) order.emplace_back(offset, value);
+    check(order == std::vector<std::pair<std::uint32_t, std::uint32_t>>{{0x10, 7}, {0x41, 2}, {0x300, 3}}, "register file order");
+    auto copy = registers;
+    copy[0x7000] = 5;
+    check(copy.size() == 4 && registers.size() == 3 && !registers.contains(0x7000) && !(copy == registers), "register file copy");
+    check(copy.erase(0x7000) == 1 && copy.erase(0x7000) == 0 && copy == registers, "register file erase");
+    bool threw = false;
+    try {
+        static_cast<void>(registers.at(0x42));
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    check(threw, "register file read an unset register");
+}
+
 void testContextAndBases() {
     AgcDriver::QueueState state;
     execute(state, makePacket(0x69, {0x10, 17}));
@@ -521,6 +544,7 @@ int main(int argc, char** argv) {
         testCatalog();
         testWriteChangedKeepsUntouchedBytes();
         testRegisters();
+        testRegisterFile();
         testContextAndBases();
         testIndexedDraw();
         testAutoDraw();

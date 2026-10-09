@@ -541,7 +541,7 @@ VkFormat StorageFormatOrUndefined(const Context& context, VkFormat format) {
 
 VkFormat StorageFormatFor(const Context& context, VkFormat format) {
     const auto storage = StorageFormatOrUndefined(context, format);
-    Require(storage != VK_FORMAT_UNDEFINED, "guest storage texture format " + std::to_string(format) + " cannot be used as a storage image");
+    if (storage == VK_FORMAT_UNDEFINED) Require(false, "guest storage texture format " + std::to_string(format) + " cannot be used as a storage image");
     return storage;
 }
 

@@ -152,7 +152,16 @@ target_include_directories(libSceAgcDriver PRIVATE
         ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Headers/include
 )
 
-add_shader_recompiler(shader_recompiler_agc_driver libc)
+file(GLOB_RECURSE agcShaderCacheGuardSources CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+)
+list(FILTER agcShaderCacheGuardSources EXCLUDE REGEX "^${CMAKE_CURRENT_SOURCE_DIR}/(tests|tools)/")
+add_shader_recompiler(shader_recompiler_agc_driver libc
+        GUARD_SOURCES
+        ${agcShaderCacheGuardSources}
+)
 
 target_link_libraries(libSceAgcDriver PRIVATE
         shader_recompiler_agc_driver
@@ -163,6 +172,9 @@ target_link_libraries(libSceAgcDriver PRIVATE
 
 set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceAgcDriver)
+if(WIN32)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/GuestMemory.cpp PROPERTIES COMPILE_DEFINITIONS _WIN32_WINNT=0x0602)
+endif()
 
 foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
     string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
@@ -313,6 +325,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/ColorTargetLayout.cpp
         tests/BdaResources.cpp
         tests/GuestAllocations.cpp
+        tests/LiveStack.cpp
         tests/TextureFormat.cpp
         tests/TextureTiling.cpp
         tests/GuestTextureResource.cpp

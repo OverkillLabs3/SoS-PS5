@@ -40,7 +40,7 @@ Registers::const_iterator find(const Registers& registers, std::uint32_t offset,
 
 float readFloat(const Registers& registers, std::uint32_t offset) {
     const auto value = std::bit_cast<float>(read(registers, offset));
-    Require(std::isfinite(value), "non-finite register at DWORD " + std::to_string(offset));
+    if (!std::isfinite(value)) Require(false, "non-finite register at DWORD " + std::to_string(offset));
     return value;
 }
 

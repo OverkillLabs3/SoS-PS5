@@ -291,6 +291,7 @@ private:
     std::vector<Allocation> allocations;
 
     std::size_t readOnlyBuffers = 0;
+    bool drawBuild = false;
     std::vector<std::shared_ptr<Texture>> textures;
     std::vector<bool> textureFirstLayer;
     std::vector<std::shared_ptr<StorageTexture>> storageTextures;

@@ -23,12 +23,22 @@ constexpr int GuestTimedOut = 60, GuestInvalid = 22, GuestNoSys = 78;
 struct GuestTimespec { std::int64_t sec; std::int64_t nsec; };
 
 struct Waiter { void* address; HANDLE event; Waiter* next; };
-std::atomic_flag lockFlag = ATOMIC_FLAG_INIT;
-Waiter* head = nullptr;
-void Lock() { while (lockFlag.test_and_set(std::memory_order_acquire)) YieldProcessor(); }
-void Unlock() { lockFlag.clear(std::memory_order_release); }
-void Unlink(Waiter* waiter) {
-    for (Waiter** link = &head; *link; link = &(*link)->next)
+
+constexpr std::size_t BucketCount = 64;
+struct alignas(64) Bucket {
+    SRWLOCK lock = SRWLOCK_INIT;
+    Waiter* head = nullptr;
+};
+Bucket buckets[BucketCount];
+
+Bucket& BucketOf(const void* address) {
+    const auto hashed = (reinterpret_cast<std::uintptr_t>(address) >> 2) * 0x9e3779b97f4a7c15ull;
+    return buckets[hashed >> 58];
+}
+void Lock(Bucket& bucket) { AcquireSRWLockExclusive(&bucket.lock); }
+void Unlock(Bucket& bucket) { ReleaseSRWLockExclusive(&bucket.lock); }
+void Unlink(Bucket& bucket, Waiter* waiter) {
+    for (Waiter** link = &bucket.head; *link; link = &(*link)->next)
         if (*link == waiter) { *link = waiter->next; return; }
 }
 }
@@ -58,13 +68,14 @@ int APS5_VABI _umtx_op_nid_postfix(void* object, int op, unsigned long value, vo
         Waiter waiter{object, static_cast<HANDLE>(self->wakeEvent), nullptr};
         ResetEvent(waiter.event);
         self->inWait.store(true);
-        Lock();
+        Bucket& bucket = BucketOf(object);
+        Lock(bucket);
         const std::uint64_t current = wide ? *static_cast<volatile std::uint64_t*>(object) : *static_cast<volatile std::uint32_t*>(object);
         bool queued = false;
         if (current == expected && self->pendingException.load() == 0) {
-            waiter.next = head; head = &waiter; queued = true;
+            waiter.next = bucket.head; bucket.head = &waiter; queued = true;
         }
-        Unlock();
+        Unlock(bucket);
         bool timedOut = false;
         if (queued) {
             char target[40];
@@ -72,7 +83,7 @@ int APS5_VABI _umtx_op_nid_postfix(void* object, int op, unsigned long value, vo
             KernelParkEnter_nid_postfix("umtx", target, __builtin_return_address(0));
             timedOut = WaitForSingleObject(waiter.event, timeout) == WAIT_TIMEOUT;
             KernelParkLeave_nid_postfix();
-            Lock(); Unlink(&waiter); Unlock();
+            Lock(bucket); Unlink(bucket, &waiter); Unlock(bucket);
         }
         self->inWait.store(false);
         if (const int pending = self->pendingException.exchange(0)) RunExceptionHandlerInline(pending);
@@ -84,26 +95,28 @@ int APS5_VABI _umtx_op_nid_postfix(void* object, int op, unsigned long value, vo
         if (!object) return fail(GuestInvalid);
         if (Trace()) aps5::LogErr( "[umtx] wake tid=%lu addr=%p n=%lu\n", GetCurrentThreadId(), object, value);
         unsigned long remaining = value;
-        Lock();
-        for (Waiter** link = &head; *link && remaining;) {
+        Bucket& bucket = BucketOf(object);
+        Lock(bucket);
+        for (Waiter** link = &bucket.head; *link && remaining;) {
             Waiter* waiter = *link;
             if (waiter->address == object) { *link = waiter->next; SetEvent(waiter->event); --remaining; }
             else link = &waiter->next;
         }
-        Unlock();
+        Unlock(bucket);
         return 0;
     }
     case OpNWakePrivate: {
 
         auto* addresses = static_cast<void* const*>(object);
         for (unsigned long i = 0; i < value; ++i) {
-            Lock();
-            for (Waiter** link = &head; *link;) {
+            Bucket& bucket = BucketOf(addresses[i]);
+            Lock(bucket);
+            for (Waiter** link = &bucket.head; *link;) {
                 Waiter* waiter = *link;
                 if (waiter->address == addresses[i]) { *link = waiter->next; SetEvent(waiter->event); break; }
                 link = &waiter->next;
             }
-            Unlock();
+            Unlock(bucket);
         }
         return 0;
     }

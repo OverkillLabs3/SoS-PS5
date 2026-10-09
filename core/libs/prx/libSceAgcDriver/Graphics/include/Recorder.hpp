@@ -69,6 +69,8 @@ public:
     bool PendingWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
 
     bool PendingWriteSettled(std::uint64_t address, std::size_t bytes) const;
+    std::uint64_t LastWriteNote(std::uint64_t address, std::size_t bytes) const;
+    std::uint64_t NewestWriteNote(std::uint64_t address, std::size_t bytes) const;
 
     enum class ReadKind : std::uint8_t { DispatchElement = 0, GpuCopy, AddressBased, Indirect, StorageUpload, CopySource, Count };
     static bool ReadTracking();
@@ -134,6 +136,7 @@ public:
     void FlushStores();
     void FlushStoresOverlapping(std::uint64_t address, std::size_t bytes) { if (HasQueuedStores() && QueuedStoreOverlaps(address, bytes)) FlushStores(); }
 
+    static constexpr std::size_t LabelTableBytes = 64;
     void NoteLabel(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue);
 
     static void CloseLabelGroup(std::uint64_t trackerGeneration);
@@ -163,6 +166,7 @@ public:
     static std::optional<LabelHit> LookupLabel(std::uint64_t address, std::size_t bytes, std::uint64_t afterStamp, LabelRefusal* refusal = nullptr);
 
     static std::optional<std::uint64_t> LookupLabelValue(std::uint64_t address, std::size_t bytes, std::uint64_t afterStamp);
+    static bool WideLabelIn(std::uint64_t address, std::size_t bytes);
 
     static void NoteQueuedLabel(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue);
 
@@ -274,6 +278,7 @@ private:
         std::vector<std::shared_ptr<void>> kept;
         std::vector<std::function<void()>> completions;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+        std::vector<std::uint64_t> writeNotes;
 
         struct Read {
             std::uint64_t begin;
@@ -298,6 +303,7 @@ private:
         std::uint64_t readGeneration = 0;
 
         std::vector<std::uint64_t> labelDwords;
+        std::vector<std::multimap<std::uint64_t, std::uint64_t>::iterator> wideLabels;
 
         std::uint32_t completionLabelCount = 0;
 
@@ -447,6 +453,9 @@ private:
     std::map<std::uint64_t, LabelEntry> labels;
 
     std::map<std::uint64_t, LabelEntry> queuedLabels;
+    std::multimap<std::uint64_t, std::uint64_t> wideLabels;
+    std::uint64_t wideLabelBytes = 0;
+    bool wideLabelInLocked(std::uint64_t address, std::size_t bytes) const;
 
     std::atomic<std::size_t> recordedLabels{0};
     std::unique_ptr<Batch> open;
@@ -454,6 +463,7 @@ private:
 
     std::vector<const Batch*> finishing;
     std::uint64_t submissions = 0;
+    std::uint64_t writeNoteCount = 0;
 
     std::vector<std::pair<VkCommandBuffer, VkFence>> spare;
     std::vector<VkQueryPool> sparePools;

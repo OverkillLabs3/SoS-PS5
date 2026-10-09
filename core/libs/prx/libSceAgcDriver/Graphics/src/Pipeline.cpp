@@ -257,16 +257,20 @@ std::shared_ptr<Framebuffer> Pipeline::AcquireFramebuffer(std::span<const VkImag
     Require(targets.size() == attachments && owners.size() == colorAttachments, "render targets do not match the pipeline's attachments");
     const bool resident = std::all_of(owners.begin(), owners.end(), [](const auto& owner) { return owner != nullptr; });
     if (resident) {
+        const auto matches = [&](const CachedFramebuffer& entry) {
+            if (entry.extent.width != extent.width || entry.extent.height != extent.height || !std::equal(entry.views.begin(), entry.views.end(), targets.begin(), targets.end())) return false;
+            for (std::size_t i = 0; i < owners.size(); ++i) {
+                if (entry.owners[i].lock().get() != owners[i].get()) return false;
+            }
+            return true;
+        };
+        if (!framebuffers.empty() && matches(framebuffers.back())) return framebuffers.back().framebuffer;
 
         std::erase_if(framebuffers, [](const CachedFramebuffer& entry) {
             return entry.framebuffer.use_count() == 1 && std::any_of(entry.owners.begin(), entry.owners.end(), [](const auto& owner) { return owner.expired(); });
         });
         for (auto it = framebuffers.begin(); it != framebuffers.end(); ++it) {
-            if (it->extent.width != extent.width || it->extent.height != extent.height || !std::equal(it->views.begin(), it->views.end(), targets.begin(), targets.end())) continue;
-
-            bool same = true;
-            for (std::size_t i = 0; i < owners.size() && same; ++i) same = it->owners[i].lock().get() == owners[i].get();
-            if (!same) continue;
+            if (!matches(*it)) continue;
             std::rotate(it, std::next(it), framebuffers.end());
             return framebuffers.back().framebuffer;
         }
@@ -499,7 +503,7 @@ std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& st
     auto pipeline = std::make_shared<Pipeline>(context, state, vertexInput, resources, shaders, attachmentLayout);
     store.entries.push_back({context.device, context.bufferPool, hash, key, pipeline});
     store.index[hash] = std::prev(store.entries.end());
-    constexpr std::size_t bound = 256;
+    constexpr std::size_t bound = 1024;
     while (store.entries.size() > bound) {
 
         const auto victim = std::find_if(store.entries.begin(), store.entries.end(), [](const PipelineStore::Entry& entry) { return entry.pipeline.use_count() == 1; });

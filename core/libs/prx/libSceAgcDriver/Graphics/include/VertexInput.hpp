@@ -143,9 +143,7 @@ inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute&
     const auto address = attribute.resource.fields[0] | (static_cast<std::uint64_t>(attribute.resource.fields[1] & 0xffffu) << 32u);
     Require(address != 0 && required <= std::numeric_limits<std::uint64_t>::max() - address, "invalid vertex buffer address range");
     if (padToWholeRecord && stride != 0) {
-        // Some GPUs (observed on AMD) count the records of a vertex buffer as range / stride, rounded down. A range that ends
-        // inside the last record then makes that vertex read as out of bounds (zeros). index < records guarantees that the
-        // whole record is still inside the descriptor, so it can be covered.
+
         const auto whole = static_cast<std::uint64_t>(stride) * (static_cast<std::uint64_t>(index) + 1u);
         if (whole > required && whole <= available && whole <= std::numeric_limits<std::uint64_t>::max() - address) return static_cast<std::size_t>(whole);
     }

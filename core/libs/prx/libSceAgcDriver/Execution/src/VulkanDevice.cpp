@@ -914,6 +914,11 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = family;
     check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &poolInfo, nullptr, &state->pool), "vkCreateCommandPool");
+    static const bool procTable = std::getenv("APS5_NO_PROC_TABLE") == nullptr;
+    if (procTable) {
+        Graphics::FillDeviceFunctions(graphicsContext(), state->deviceFunctions);
+        state->functionsReady = true;
+    }
     Graphics::PrepareImportWatch(graphicsContext());
     state->bufferPool = std::make_shared<Graphics::BufferPool>(graphicsContext());
     state->emptyBuffer = std::make_unique<Graphics::Buffer>(graphicsContext(), Graphics::EmptyBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -926,11 +931,6 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->recorder = std::make_unique<Graphics::Recorder>(graphicsContext(), state->timelineSemaphores);
     state->recorder->Activate();
 
-    static const bool procTable = std::getenv("APS5_NO_PROC_TABLE") == nullptr;
-    if (procTable) {
-        Graphics::FillDeviceFunctions(graphicsContext(), state->deviceFunctions);
-        state->functionsReady = true;
-    }
     state->context = buildContext();
     state->contextReady = true;
     if (window != nullptr) {

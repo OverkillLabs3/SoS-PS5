@@ -107,7 +107,17 @@ void materializeRegisterClear(const Context& context, const ColorTarget& color, 
     if (CurrentDccKeys(color.dccAddress, color.bytes) != DccKeys::ClearRegister) return;
     const auto texel = clearTexel(color, DccKeys::ClearRegister);
     const char* refusal = nullptr;
-    if (clearToTexel(resident, texel, color.elementBytes, refusal)) {
+    bool cleared = clearToTexel(resident, texel, color.elementBytes, refusal);
+    const auto keyBytes = static_cast<std::size_t>(color.bytes / 256);
+    if (!cleared && keyBytes != 0) {
+        if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->PendingWriteOverlaps(color.dccAddress, keyBytes)) {
+            Recorder::CountSync(2);
+            recorder->SyncThrough(color.dccAddress, keyBytes);
+            if (CurrentDccKeys(color.dccAddress, color.bytes) != DccKeys::ClearRegister) return;
+            cleared = clearToTexel(resident, texel, color.elementBytes, refusal);
+        }
+    }
+    if (cleared) {
         MarkDccUncompressed(context, color.dccAddress, color.bytes);
         return;
     }
@@ -827,8 +837,6 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
         if (args == nullptr) {
-            // Cover the whole last record (see VertexBufferReadSize), but only when that cannot make a draw that worked fail:
-            // the extra bytes must be readable and must not overlap the render target.
             const auto whole = VertexBufferReadSize(attribute, inputs.maxIndex, draw.instanceCount, draw.firstInstance, true);
             if (whole > bytes && GuestMemory::Accessible(reinterpret_cast<const void*>(address), whole) && (!state.hasColorTarget || address + whole <= state.color.address || state.color.address + state.color.bytes <= address)) bytes = whole;
         }

@@ -127,6 +127,7 @@ public:
     void AddReadable(std::uint64_t address, std::size_t bytes);
 
     void AllowDeviceStaging() { stagingAllowed = true; }
+    void AllowAdjustedRegions() { adjustedRegions = true; }
 
     void RecordStagingCopies(Recorder& recorder);
     void AddSnapshot(const GuestMemorySnapshot& snapshot);
@@ -221,11 +222,13 @@ private:
     bool gpuCopyEligible(const Region& region) const;
 
     bool stagingEligible(const Region& region, bool addressable) const;
+    bool bindableInPlace(std::uint64_t offset, bool addressable) const;
 
     void recordGpuCopies(std::span<Region* const> copies, bool addressable);
     void takeHeapReferences();
     Context context;
     bool stagingAllowed = false;
+    bool adjustedRegions = false;
     GuestAllocations::Lease lease;
 
     std::shared_ptr<const AddressSpace> space;

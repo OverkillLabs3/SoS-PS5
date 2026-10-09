@@ -791,7 +791,7 @@ private:
 };
 
 void FlushForAccess(std::uint64_t address, std::size_t bytes) {
-    hookCalls.fetch_add(1, std::memory_order_relaxed);
+    if (DrawProfiled()) hookCalls.fetch_add(1, std::memory_order_relaxed);
 
     if (!QueuedLabelRanges().empty() && QueuedLabelOverlaps(address, bytes)) {
         if (completionDepth != 0 && HookCompletionGuard()) {
@@ -802,7 +802,7 @@ void FlushForAccess(std::uint64_t address, std::size_t bytes) {
         }
     }
     if (!HookSnapshotEnabled() || SnapshotOverlaps(address, bytes)) {
-        hookLocks.fetch_add(1, std::memory_order_relaxed);
+        if (DrawProfiled()) hookLocks.fetch_add(1, std::memory_order_relaxed);
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Hook);
         std::lock_guard gpu(GuestMemory::GpuMutex());
         if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->PendingWriteOverlaps(address, bytes)) {
@@ -968,6 +968,20 @@ std::optional<Recorder::LabelHit> Recorder::LookupLabel(std::uint64_t address, s
     std::lock_guard tableLock(labelTableMutex);
     if (labelTableOwner == nullptr) return std::nullopt;
     return labelTableOwner->lookupLabel(address, bytes, afterStamp, refusal);
+}
+
+bool Recorder::WideLabelIn(std::uint64_t address, std::size_t bytes) {
+    std::lock_guard tableLock(labelTableMutex);
+    return labelTableOwner != nullptr && labelTableOwner->wideLabelInLocked(address, bytes);
+}
+
+bool Recorder::wideLabelInLocked(std::uint64_t address, std::size_t bytes) const {
+    if (wideLabels.empty() || bytes == 0) return false;
+    const auto end = address + bytes;
+    for (auto it = wideLabels.lower_bound(address >= wideLabelBytes ? address - wideLabelBytes + 1 : 0); it != wideLabels.end() && it->first < end; ++it) {
+        if (it->second > address) return true;
+    }
+    return false;
 }
 
 std::optional<std::uint64_t> Recorder::LookupLabelValue(std::uint64_t address, std::size_t bytes, std::uint64_t afterStamp) {
@@ -1798,6 +1812,7 @@ bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel
     ensureOpen();
     const auto end = address + bytes;
     open->writes.emplace_back(address, end);
+    open->writeNotes.push_back(++writeNoteCount);
     if (!ownLabel) markOverwritten(address, end);
 
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
@@ -1819,6 +1834,7 @@ void Recorder::noteWriteOn(Batch& batch, std::uint64_t address, std::size_t byte
     }
 
     batch.writes.emplace_back(address, address + bytes);
+    batch.writeNotes.push_back(++writeNoteCount);
     if (!ownLabel) markOverwritten(address, address + bytes);
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
     if (!SnapshotCovers(address, address + bytes)) publishPendingWrites();
@@ -1903,6 +1919,26 @@ bool Recorder::PendingWriteSettled(std::uint64_t address, std::size_t bytes) con
         if (overlaps(*batch, address, end) && !signaled(*batch)) return false;
     }
     return true;
+}
+
+std::uint64_t Recorder::LastWriteNote(std::uint64_t address, std::size_t bytes) const {
+    if (open == nullptr || open->writes.empty() || open->writeNotes.size() != open->writes.size()) return 0;
+    if (open->writes.back() != std::pair<std::uint64_t, std::uint64_t>{address, address + bytes}) return 0;
+    return open->writeNotes.back() == writeNoteCount ? writeNoteCount : 0;
+}
+
+std::uint64_t Recorder::NewestWriteNote(std::uint64_t address, std::size_t bytes) const {
+    if (bytes == 0) return 0;
+    const auto end = address + bytes;
+    std::uint64_t newest = 0;
+    const auto scan = [&](const Batch& batch) {
+        for (std::size_t i = 0; i < batch.writes.size(); ++i) {
+            if (address < batch.writes[i].second && batch.writes[i].first < end) newest = std::max(newest, batch.writeNotes[i]);
+        }
+    };
+    if (open != nullptr) scan(*open);
+    for (const auto& batch : inFlight) scan(*batch);
+    return newest;
 }
 
 bool Recorder::ReadTracking() {
@@ -2036,7 +2072,16 @@ void Recorder::markBehindCompletion(const Batch& batch, std::uint64_t begin, std
 void Recorder::NoteLabel(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue) {
     ensureOpen();
 
-    noteLabelOn(*open, address, bytes, stamp, queue);
+    const bool tabled = bytes.size() <= LabelTableBytes;
+    if (tabled) {
+        noteLabelOn(*open, address, bytes, stamp, queue);
+    } else {
+        std::lock_guard tableLock(labelTableMutex);
+        labels.erase(labels.lower_bound(address), labels.lower_bound(address + bytes.size()));
+        recordedLabels.store(labels.size(), std::memory_order_relaxed);
+        open->wideLabels.push_back(wideLabels.emplace(address, address + bytes.size()));
+        wideLabelBytes = std::max<std::uint64_t>(wideLabelBytes, bytes.size());
+    }
     if (activeRecorder == this && pendingLabelSince.load(std::memory_order_relaxed) == NoPendingLabel) {
         pendingLabelSince.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
     }
@@ -2059,6 +2104,7 @@ bool Recorder::PendingLabelIn(std::uint64_t address, std::size_t bytes) const {
     if (bytes == 0) return false;
     const auto end = address + bytes;
     if (const auto first = labels.lower_bound(address); first != labels.end() && first->first < end) return true;
+    if (wideLabelInLocked(address, bytes)) return true;
 
     if (const auto first = queuedLabels.lower_bound(address); first != queuedLabels.end() && first->first < end) return true;
     return false;
@@ -2695,15 +2741,17 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source) {
         holdCounters.completionMs += std::chrono::duration<double, std::milli>(now - completionStart).count();
     }
 
-    if (!batch->labelDwords.empty()) {
+    if (!batch->labelDwords.empty() || !batch->wideLabels.empty()) {
         std::lock_guard tableLock(labelTableMutex);
         for (const auto dword : batch->labelDwords) {
             const auto found = labels.find(dword);
             if (found != labels.end() && found->second.batch == batch.get()) labels.erase(found);
         }
+        for (const auto entry : batch->wideLabels) wideLabels.erase(entry);
         recordedLabels.store(labels.size(), std::memory_order_relaxed);
     }
     batch->labelDwords.clear();
+    batch->wideLabels.clear();
     release(*batch);
 }
 
