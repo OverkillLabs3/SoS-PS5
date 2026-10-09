@@ -57,6 +57,10 @@ void Driver::drainDraws() {
     ++g_drains;
 }
 
+void Driver::releaseDrawBackend() {
+    drawBackendSlot().reset();
+}
+
 bool Driver::drawsPending() {
     auto& slot = drawBackendSlot();
     return slot != nullptr && !slot->Idle();
