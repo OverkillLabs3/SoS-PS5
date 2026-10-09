@@ -96,6 +96,14 @@ bool ReadRevealFullMap(const std::wstring& directory) {
     return wcscmp(value, L"1") == 0;
 }
 
+int ReadFrameRate(const std::wstring& directory) {
+    wchar_t value[16] = {};
+    GetPrivateProfileStringW(L"Display", L"frame_rate", L"60", value, 16, (directory + kLauncherIni).c_str());
+    if (wcscmp(value, L"120") == 0) return 1;
+    if (wcscmp(value, L"unlocked") == 0) return 2;
+    return 0;
+}
+
 bool ReadShowInGameFps(const std::wstring& directory) {
     wchar_t value[8] = {};
     GetPrivateProfileStringW(L"QualityOfLife", L"show_in_game_fps", L"0", value, 8, (directory + kLauncherIni).c_str());
@@ -750,7 +758,7 @@ struct Launcher {
     static constexpr int kWorkAreaMargin = 24;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors. The Quality of Life section includes the two-line Skip dialogue hint.
-    static constexpr int kQualityTop = 272, kQualityRows = 5, kSkipDialogueHint = 50;
+    static constexpr int kQualityTop = 310, kQualityRows = 5, kSkipDialogueHint = 50;
     static constexpr int kQualityHeight = 70 + 32 * (kQualityRows - 1) + kSkipDialogueHint;
     static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 96, kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 620, kHeight = kButtonsTop + 48;
@@ -760,6 +768,8 @@ struct Launcher {
     HWND window = nullptr;
     HWND mode = nullptr;
     HWND resolution = nullptr;
+    HWND frameRate = nullptr;
+    int frameRateChoice = 0;
     HWND skip = nullptr;
     HWND skipDialogueBox = nullptr;
     HWND ladderGrabBox = nullptr;
@@ -880,6 +890,7 @@ struct Launcher {
         if (message == WM_COMMAND && self != nullptr && (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)) {
             self->play = LOWORD(wParam) == IDOK;
             self->borderless = SendMessageW(self->mode, CB_GETCURSEL, 0, 0) == 1;
+            self->frameRateChoice = static_cast<int>(SendMessageW(self->frameRate, CB_GETCURSEL, 0, 0));
             self->skipIntro = SendMessageW(self->skip, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->skipDialogue = SendMessageW(self->skipDialogueBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->ladderGrabWithUp = SendMessageW(self->ladderGrabBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -901,6 +912,7 @@ struct Launcher {
     bool Run(const std::wstring& directory, HICON icon) {
         borderless = ReadBorderless(directory);
         skipIntro = ReadSkipIntro(directory);
+        frameRateChoice = ReadFrameRate(directory);
         skipDialogue = ReadSkipDialogue(directory);
         ladderGrabWithUp = ReadLadderGrabWithUp(directory);
         revealFullMap = ReadRevealFullMap(directory);
@@ -951,14 +963,16 @@ struct Launcher {
             return handle;
         };
         control(L"STATIC", L"God of War: Sons of Sparta", 0, 24, 16, kWidth - 48, 34, 0, heading);
-        control(L"BUTTON", L"Display", BS_GROUPBOX, 24, 62, kWidth - 48, 198, 0, font);
+        control(L"BUTTON", L"Display", BS_GROUPBOX, 24, 62, kWidth - 48, 236, 0, font);
         control(L"STATIC", L"Display mode", SS_CENTERIMAGE, 44, 92, 104, 28, 0, font);
         mode = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 152, 92, 244, 200, 101, font);
         control(L"STATIC", L"Resolution", SS_CENTERIMAGE, 44, 130, 104, 28, 0, font);
         resolution = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 152, 130, 244, 200, 100, font);
+        control(L"STATIC", L"Frame rate", SS_CENTERIMAGE, 44, 168, 104, 28, 0, font);
+        frameRate = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 152, 168, 244, 200, 103, font);
         // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
-        control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
-        control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
+        control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 214, 352, 24, 0, font);
+        control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 246, 352, 48, 0, font);
         control(L"BUTTON", L"Quality of Life", BS_GROUPBOX, 24, kQualityTop, kWidth - 48, kQualityHeight, 0, font);
         showInGameFpsBox = checkBox(L"Show in-game FPS", 44, kQualityTop + 30, kWidth - 88, 113);
         skip = checkBox(L"Skip intro", 44, kQualityTop + 30 + 32, kWidth - 88, 102);
@@ -977,6 +991,10 @@ struct Launcher {
         SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Windowed"));
         SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Borderless Fullscreen"));
         SendMessageW(mode, CB_SETCURSEL, borderless ? 1 : 0, 0);
+        SendMessageW(frameRate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"60 FPS"));
+        SendMessageW(frameRate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"120 FPS"));
+        SendMessageW(frameRate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unlocked (experimental)"));
+        SendMessageW(frameRate, CB_SETCURSEL, frameRateChoice, 0);
         SendMessageW(skip, BM_SETCHECK, skipIntro ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(skipDialogueBox, BM_SETCHECK, skipDialogue ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(ladderGrabBox, BM_SETCHECK, ladderGrabWithUp ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1040,6 +1058,9 @@ struct Launcher {
         }
         if (play && revealFullMap != ReadRevealFullMap(directory) && !saveIni(L"QualityOfLife", L"RevealFullMap", revealFullMap ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Reveal full Map setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
+        }
+        if (play && frameRateChoice != ReadFrameRate(directory) && !saveIni(L"Display", L"frame_rate", frameRateChoice == 1 ? L"120" : frameRateChoice == 2 ? L"unlocked" : L"60")) {
+            MessageBoxW(nullptr, L"The Frame rate setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
         if (play && showInGameFps != ReadShowInGameFps(directory) && !saveIni(L"QualityOfLife", L"show_in_game_fps", showInGameFps ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Show in-game FPS setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
@@ -1132,6 +1153,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     bool ladderGrabWithUp = false;
     bool revealFullMap = false;
     bool showInGameFps = false;
+    int frameRateChoice = 0;
     bool cheatsEnabled = false;
     {
         Launcher launcher;
@@ -1142,6 +1164,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         ladderGrabWithUp = launcher.ladderGrabWithUp;
         revealFullMap = launcher.revealFullMap;
         showInGameFps = launcher.showInGameFps;
+        frameRateChoice = launcher.frameRateChoice;
         cheatsEnabled = launcher.cheatsEnabled;
     }
 
@@ -1223,6 +1246,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     SetEnvironmentVariableW(L"SOS_SKIP_DIALOGUE", skipDialogue ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_LADDER_GRAB_WITH_UP", ladderGrabWithUp ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_REVEAL_FULL_MAP", revealFullMap ? L"1" : nullptr);
+    SetEnvironmentVariableW(L"APS5_VBLANK_HZ", frameRateChoice >= 1 ? L"1000" : nullptr);
+    SetEnvironmentVariableW(L"APS5_FPS_CAP", frameRateChoice == 1 ? L"120" : nullptr);
     SetEnvironmentVariableW(L"SOS_SHOW_IN_GAME_FPS", showInGameFps ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_CHEATS_ENABLED", cheatsEnabled ? L"1" : nullptr);
     for (const wchar_t* variable : kLegacyCheatVariables) SetEnvironmentVariableW(variable, nullptr);

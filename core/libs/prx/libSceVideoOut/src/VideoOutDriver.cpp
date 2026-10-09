@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <exception>
+#include <algorithm>
 #include <thread>
 #include <limits>
 #include <stdexcept>
@@ -527,8 +528,36 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
                 current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
+                const auto flipStart = std::chrono::steady_clock::now();
                 processFlip(*current);
                 syncMenuInput();
+                {
+                    static const std::chrono::steady_clock::duration capInterval = [] {
+                        const char* text = std::getenv("APS5_FPS_CAP");
+                        const double cap = text ? std::atof(text) : 0.0;
+                        if (cap < 30.0 || cap > 1000.0) return std::chrono::steady_clock::duration::zero();
+                        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(1.0 / cap));
+                    }();
+                    if (capInterval != std::chrono::steady_clock::duration::zero()) {
+                        static std::chrono::steady_clock::time_point schedule{};
+                        if (schedule == std::chrono::steady_clock::time_point{} || flipStart - schedule > capInterval) schedule = flipStart;
+                        const auto due = schedule + capInterval;
+                        schedule = due;
+                        const auto spinFrom = due - std::chrono::microseconds(1500);
+                        const auto early = spinFrom - std::chrono::steady_clock::now();
+                        if (early > std::chrono::steady_clock::duration::zero()) {
+#ifdef _WIN32
+                            static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002, TIMER_ALL_ACCESS);
+                            if (timer != nullptr) {
+                                LARGE_INTEGER relative;
+                                relative.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(early).count() / 100;
+                                if (SetWaitableTimer(timer, &relative, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, INFINITE);
+                            }
+#endif
+                        }
+                        while (std::chrono::steady_clock::now() < due) std::this_thread::yield();
+                    }
+                }
                 const auto finished = AgcDriver::FrameTiming::Clock::now();
                 AgcDriver::FrameTiming::Clock::duration interval{};
                 {
@@ -568,11 +597,16 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
 }
 
 void VideoOutDriver::vblankLoop(std::stop_token token) {
-    using Frame = std::chrono::duration<int64_t, std::ratio<1001, 60000>>;
+    double hz = 60000.0 / 1001.0;
+    if (const char* text = std::getenv("APS5_VBLANK_HZ")) {
+        const double requested = std::atof(text);
+        if (requested >= 30.0 && requested <= 1000.0) hz = requested;
+    }
+    const std::chrono::duration<double, std::nano> period(1.0e9 / hz);
     const auto start = std::chrono::steady_clock::now();
     try {
         for (int64_t frame = 1; !token.stop_requested(); ++frame) {
-            const auto next = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(Frame(frame));
+            const auto next = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(period * static_cast<double>(frame));
             {
                 std::unique_lock lock(flipQueue->mutex);
                 flipQueue->changed.wait_until(lock, next, [&] { return token.stop_requested() || flipQueue->failure; });
