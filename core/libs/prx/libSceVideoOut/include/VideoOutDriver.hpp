@@ -16,6 +16,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
+#include "prx/libSceVideoOut/include/ImGuiOverlay.hpp"
 #include "prx/libSceVideoOut/include/BufferReuseTracker.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 
@@ -197,6 +198,7 @@ private:
     std::shared_ptr<FlipQueue> flipQueue = std::make_shared<FlipQueue>();
 
     DisplayWindow window;
+    ImGuiOverlay overlay;
 
     std::jthread presentThread;
     std::jthread vblankThread;

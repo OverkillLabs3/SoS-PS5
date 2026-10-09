@@ -823,9 +823,15 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     const bool hudSampled = HudTraceWanted(GuestMemory::TraceFrame());
     for (const auto& attribute : attributes) {
 
-        const auto bytes = args != nullptr ? VertexBufferExtent(attribute) : VertexBufferReadSize(attribute, inputs.maxIndex, draw.instanceCount, draw.firstInstance);
+        auto bytes = args != nullptr ? VertexBufferExtent(attribute) : VertexBufferReadSize(attribute, inputs.maxIndex, draw.instanceCount, draw.firstInstance);
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
+        if (args == nullptr) {
+            // Cover the whole last record (see VertexBufferReadSize), but only when that cannot make a draw that worked fail:
+            // the extra bytes must be readable and must not overlap the render target.
+            const auto whole = VertexBufferReadSize(attribute, inputs.maxIndex, draw.instanceCount, draw.firstInstance, true);
+            if (whole > bytes && GuestMemory::Accessible(reinterpret_cast<const void*>(address), whole) && (!state.hasColorTarget || address + whole <= state.color.address || state.color.address + state.color.bytes <= address)) bytes = whole;
+        }
         Require(!state.hasColorTarget || address + bytes <= state.color.address || state.color.address + state.color.bytes <= address, "vertex buffer aliases the render target");
 
         const bool unreadable = !GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes);

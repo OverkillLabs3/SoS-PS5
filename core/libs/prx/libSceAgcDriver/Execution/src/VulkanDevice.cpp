@@ -2,6 +2,7 @@
 #include "prx/common/StderrLog.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PresentationOverlay.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PresentationScaler.hpp"
@@ -261,6 +262,10 @@ struct VulkanDevice::State {
     std::shared_ptr<std::vector<std::shared_ptr<Graphics::ShaderResources>>> copiedWriters = std::make_shared<std::vector<std::shared_ptr<Graphics::ShaderResources>>>();
     VkPhysicalDeviceMeshShaderPropertiesEXT meshLimits{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
     std::unique_ptr<PresentationScaler> scaler;
+    PresentationOverlay* overlay = nullptr;
+    bool overlayUsable = false;
+    std::uint32_t queueFamily = 0;
+    std::uint64_t swapchainSerial = 0;
 
     bool imageAcquired = false;
     std::uint32_t acquiredIndex = 0;
@@ -793,6 +798,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     queueInfo.queueFamilyIndex = family;
+    state->queueFamily = family;
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &priority;
     VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
@@ -1000,13 +1006,15 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         swapchain.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
         swapchain.imageExtent = state->extent;
         swapchain.imageArrayLayers = 1;
-        swapchain.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        state->overlayUsable = (surface.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
+        swapchain.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | (state->overlayUsable ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0u);
         swapchain.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         swapchain.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         swapchain.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         swapchain.presentMode = VK_PRESENT_MODE_FIFO_KHR;
         swapchain.clipped = VK_FALSE;
         check(state->DeviceFunction<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(state->device, &swapchain, nullptr, &state->swapchain), "vkCreateSwapchainKHR");
+        ++state->swapchainSerial;
         std::uint32_t imageCount = 0;
         auto getImages = state->DeviceFunction<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR");
         check(getImages(state->device, state->swapchain, &imageCount, nullptr), "vkGetSwapchainImagesKHR");
@@ -1546,7 +1554,7 @@ void VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) {
     create.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     create.imageExtent = {width, height};
     create.imageArrayLayers = 1;
-    create.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    create.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | (state->overlayUsable ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0u);
     create.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     create.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     create.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -1557,6 +1565,7 @@ void VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) {
     check(state->DeviceFunction<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(state->device, &create, nullptr, &replacement), "vkCreateSwapchainKHR resize");
     state->retiredSwapchains.push_back({state->swapchain, std::move(state->rendered)});
     state->swapchain = replacement;
+    ++state->swapchainSerial;
     state->extent = create.imageExtent;
     auto getImages = state->DeviceFunction<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR");
     std::uint32_t count = 0;
@@ -1570,6 +1579,10 @@ void VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) {
 
 bool VulkanDevice::Presentable() const {
     return state->extent.width != 0 && state->extent.height != 0;
+}
+
+void VulkanDevice::SetPresentationOverlay(PresentationOverlay* overlay) {
+    state->overlay = overlay;
 }
 
 bool VulkanDevice::PresentClear(std::uint32_t width, std::uint32_t height, bool opaque) {
@@ -1997,11 +2010,27 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             (direct ? slot.dumpScaler : state->scaler)->RecordReadback(commands, slot.dumpBuffer->Handle());
         }
     }
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    const PresentationOverlayFrame overlayFrame{commands, barrier.image, state->extent, VK_FORMAT_B8G8R8A8_UNORM, state->swapchainSerial, state->instance, state->physical, state->device, state->queue, state->queueFamily, state->instanceProc, state->deviceProc};
+    const bool overlayDrawn = state->overlay != nullptr && state->overlayUsable && state->overlay->Wanted(overlayFrame);
+    if (overlayDrawn) {
+        VkImageMemoryBarrier toAttachment{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        toAttachment.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toAttachment.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        toAttachment.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toAttachment.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        toAttachment.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toAttachment.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toAttachment.image = barrier.image;
+        toAttachment.subresourceRange = barrier.subresourceRange;
+        pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &toAttachment);
+        Graphics::Recorder::CountBarriers(CommandClass::PresentBlit);
+        state->overlay->Record(overlayFrame);
+    }
+    barrier.srcAccessMask = overlayDrawn ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = 0;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.oldLayout = overlayDrawn ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    pipelineBarrier(commands, overlayDrawn ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     Graphics::Recorder::CountBarriers(CommandClass::PresentBlit);
     if (slot.queries != VK_NULL_HANDLE) state->DeviceFunction<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot.queries, 1);
     check(state->DeviceFunction<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(commands), "vkEndCommandBuffer");

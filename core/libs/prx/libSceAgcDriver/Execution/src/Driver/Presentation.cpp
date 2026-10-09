@@ -60,6 +60,7 @@ void Driver::Present(const PresentationWindow& window, const DisplayBuffer* buff
             }
             require(device->Window() == window.context, "presentation window does not match device surface");
             presenting = device;
+            presenting->SetPresentationOverlay(window.overlay);
             timing.Mark("device_setup");
             std::uint32_t drawableWidth = 0;
             std::uint32_t drawableHeight = 0;

@@ -106,11 +106,11 @@ void DisplayWindow::HandleEvent(const SDL_Event& event) {
 }
 
 // Restarting the timer while windowed or unfocused gives entering or returning to fullscreen a fresh delay.
-void DisplayWindow::UpdateCursor() {
+void DisplayWindow::UpdateCursor(bool keepVisible) {
     if (window == nullptr) return;
     const auto now = SDL_GetTicks64();
     const auto flags = SDL_GetWindowFlags(window);
-    if ((flags & SDL_WINDOW_FULLSCREEN) == 0 || (flags & SDL_WINDOW_INPUT_FOCUS) == 0) lastMouseMotion = now;
+    if (keepVisible || (flags & SDL_WINDOW_FULLSCREEN) == 0 || (flags & SDL_WINDOW_INPUT_FOCUS) == 0) lastMouseMotion = now;
     const bool hide = now - lastMouseMotion >= DisplayWindowCursorHideDelayMs;
     if (hide == cursorHidden) return;
     cursorHidden = hide;
@@ -136,21 +136,23 @@ void DisplayWindow::UpdateTitle() {
     static std::uint64_t fpsStart = sceKernelGetProcessTimeCounter();
     static std::uint64_t frameNum = 0;
     static std::uint64_t fpsFrames = 0;
-    static double currentFps = 0.0;
     const auto now = sceKernelGetProcessTimeCounter();
     const auto frequency = sceKernelGetProcessTimeCounterFrequency();
     frameNum++;
     fpsFrames++;
     if (now - fpsStart >= frequency * 2) {
-        currentFps = static_cast<double>(fpsFrames) * static_cast<double>(frequency) / static_cast<double>(now - fpsStart);
+        framesPerSecond = static_cast<double>(fpsFrames) * static_cast<double>(frequency) / static_cast<double>(now - fpsStart);
         fpsStart = now;
         fpsFrames = 0;
     }
-    char status[256];
-    HostTitleStatus_nid_no_patch(status, sizeof(status));
+    HostFrameTick_nid_no_patch();
     char text[320];
-    std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)%s", title.value, currentFps, static_cast<unsigned long long>(frameNum), status);
+    std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, framesPerSecond, static_cast<unsigned long long>(frameNum));
     SDL_SetWindowTitle(window, text);
+}
+
+double DisplayWindow::FramesPerSecond() const {
+    return framesPerSecond;
 }
 
 void DisplayWindow::installSubclass() {
