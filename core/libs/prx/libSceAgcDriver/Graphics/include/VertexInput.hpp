@@ -128,7 +128,7 @@ inline std::size_t VertexBufferExtent(const ShaderRecompiler::VertexAttribute& a
     return static_cast<std::size_t>(bytes);
 }
 
-inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute& attribute, std::uint32_t maxIndex, std::uint32_t instances, std::uint32_t firstInstance = 0) {
+inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute& attribute, std::uint32_t maxIndex, std::uint32_t instances, std::uint32_t firstInstance = 0, bool padToWholeRecord = false) {
     Require(instances != 0, "vertex input requires nonzero instance count");
     Require(firstInstance <= std::numeric_limits<std::uint32_t>::max() - (instances - 1u), "vertex input instance range overflow");
     const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
@@ -142,6 +142,13 @@ inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute&
     Require(required <= available && required <= std::numeric_limits<std::size_t>::max(), "vertex fetch exceeds descriptor byte range");
     const auto address = attribute.resource.fields[0] | (static_cast<std::uint64_t>(attribute.resource.fields[1] & 0xffffu) << 32u);
     Require(address != 0 && required <= std::numeric_limits<std::uint64_t>::max() - address, "invalid vertex buffer address range");
+    if (padToWholeRecord && stride != 0) {
+        // Some GPUs (observed on AMD) count the records of a vertex buffer as range / stride, rounded down. A range that ends
+        // inside the last record then makes that vertex read as out of bounds (zeros). index < records guarantees that the
+        // whole record is still inside the descriptor, so it can be covered.
+        const auto whole = static_cast<std::uint64_t>(stride) * (static_cast<std::uint64_t>(index) + 1u);
+        if (whole > required && whole <= available && whole <= std::numeric_limits<std::uint64_t>::max() - address) return static_cast<std::size_t>(whole);
+    }
     return static_cast<std::size_t>(required);
 }
 
