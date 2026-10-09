@@ -103,6 +103,8 @@ void Driver::run(std::uint32_t id) noexcept {
         ReportFailure(error);
         for (const auto& [offset, flip] : submission.flips) flip->Fail(error);
     }
+    // Not left to thread_local destruction: joining the backend from a MinGW TLS destructor deadlocks.
+    releaseDrawBackend();
 }
 
 }

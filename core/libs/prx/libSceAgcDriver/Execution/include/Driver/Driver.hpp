@@ -199,6 +199,7 @@ private:
     static bool asyncDraws();
     static DrawBackend& drawBackend(std::uint32_t queue);
     static void drainDraws();
+    static void releaseDrawBackend();
     static bool drawsPending();
     static bool ordersNothing(std::uint32_t opcode);
     void recordAsyncDraw(AsyncDraw& task);

@@ -146,8 +146,46 @@ struct ComputePipelineObjects {
     }
 };
 
+namespace {
+
+std::mutex deferredLoadersMutex;
+std::vector<void*> deferredLoaders;
+
+// Unloading takes the Windows loader lock, so a loader released under GpuMutex waits for ReleaseDeferredVulkanLoaders.
+void ReleaseVulkanLoader(void* library) {
+    if (!GuestMemory::GpuMutex().HeldByThisThread()) {
+        SDL_UnloadObject(library);
+        return;
+    }
+    std::lock_guard lock(deferredLoadersMutex);
+    deferredLoaders.push_back(library);
+}
+
+struct VulkanLoaderLibrary {
+    void* handle = nullptr;
+
+    VulkanLoaderLibrary() = default;
+    VulkanLoaderLibrary(const VulkanLoaderLibrary&) = delete;
+    VulkanLoaderLibrary& operator=(const VulkanLoaderLibrary&) = delete;
+    ~VulkanLoaderLibrary() {
+        if (handle != nullptr) ReleaseVulkanLoader(handle);
+    }
+};
+
+}
+
+void ReleaseDeferredVulkanLoaders() {
+    std::vector<void*> pending;
+    {
+        std::lock_guard lock(deferredLoadersMutex);
+        pending.swap(deferredLoaders);
+    }
+    for (void* library : pending) ReleaseVulkanLoader(library);
+}
+
 struct VulkanDevice::State {
-    void* library = nullptr;
+    // First member, so the loader outlives every other member that may still call through it.
+    VulkanLoaderLibrary library;
     PFN_vkGetInstanceProcAddr instanceProc = nullptr;
     PFN_vkGetDeviceProcAddr deviceProc = nullptr;
     VkInstance instance = VK_NULL_HANDLE;
@@ -473,8 +511,13 @@ struct VulkanDevice::State {
                 computePipelines.clear();
             }
 
+            copiedWriters->clear();
+            Graphics::DrawCopiedWriters()->clear();
             resourceCache.Clear();
             Graphics::ClearCachedTextures(device);
+            Graphics::ClearImageMirrors(device);
+            Graphics::ClearHostImports(device);
+            patternBuffers.clear();
             descriptorCache.reset();
             emptyBuffer.reset();
             samplerCache.reset();
@@ -512,24 +555,21 @@ struct VulkanDevice::State {
             if (surface) reinterpret_cast<PFN_vkDestroySurfaceKHR>(instanceProc(instance, "vkDestroySurfaceKHR"))(instance, surface, nullptr);
             reinterpret_cast<PFN_vkDestroyInstance>(instanceProc(instance, "vkDestroyInstance"))(instance, nullptr);
         }
-        if (library != nullptr) {
-            SDL_UnloadObject(library);
-        }
     }
 };
 
 VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_unique<State>()), serial([] { static std::atomic<std::uint64_t> serials{0}; return serials.fetch_add(1, std::memory_order_relaxed) + 1; }()) {
     APS5_LOG_OUT("VulkanDevice constructor window=%p", static_cast<const void*>(window));
 #ifdef _WIN32
-    state->library = SDL_LoadObject("vulkan-1.dll");
+    state->library.handle = SDL_LoadObject("vulkan-1.dll");
 #else
-    state->library = SDL_LoadObject("libvulkan.so.1");
+    state->library.handle = SDL_LoadObject("libvulkan.so.1");
 #endif
-    if (state->library == nullptr) {
+    if (state->library.handle == nullptr) {
         throw std::runtime_error(std::string("Vulkan loader: ") + SDL_GetError());
     }
-    APS5_LOG_OUT("Vulkan loader loaded library=%p", state->library);
-    state->instanceProc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_LoadFunction(state->library, "vkGetInstanceProcAddr"));
+    APS5_LOG_OUT("Vulkan loader loaded library=%p", state->library.handle);
+    state->instanceProc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_LoadFunction(state->library.handle, "vkGetInstanceProcAddr"));
     if (state->instanceProc == nullptr) {
         throw std::runtime_error("Vulkan loader: vkGetInstanceProcAddr missing");
     }
@@ -1000,6 +1040,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
 }
 
 VulkanDevice::~VulkanDevice() = default;
+
+std::uint32_t VulkanDevice::PhysicalVendorId() const {
+    return state ? state->properties.vendorID : 0;
+}
 
 void VulkanDevice::PrepareForReplacement() {
     GuestMemory::AssertGpuLockHeld("VulkanDevice::PrepareForReplacement");
