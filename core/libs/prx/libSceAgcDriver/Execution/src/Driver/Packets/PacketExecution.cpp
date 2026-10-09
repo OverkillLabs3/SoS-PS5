@@ -282,7 +282,8 @@ void Driver::execute(const Submission& submission) {
 
                     static std::set<std::pair<std::uint64_t, std::string>> dumpedTargets;
                     const std::string reason = what.substr(0, 48);
-                    if (dumpedTargets.insert({color, reason}).second) {
+                    static const bool dumpSkipped = std::getenv("APS5_DUMP_REJECTED") != nullptr;
+                    if (dumpSkipped && dumpedTargets.insert({color, reason}).second) {
                         char name[64];
                         std::snprintf(name, sizeof(name), "draw_%llx_%08x.regs", static_cast<unsigned long long>(color), static_cast<std::uint32_t>(std::hash<std::string>{}(reason)));
                         if (std::FILE* file = std::fopen(name, "w")) {
