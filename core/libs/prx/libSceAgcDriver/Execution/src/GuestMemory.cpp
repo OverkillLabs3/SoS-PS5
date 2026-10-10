@@ -1,3 +1,10 @@
+#include <cerrno>
+#ifndef _WIN32
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
+#endif
 #include "prx/common/StderrLog.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -419,8 +426,8 @@ void PageStates::initialize() {
     std::call_once(once, [&] {
         GuestArena::GuestArenaRange_nid_postfix(&arena.base, &arena.size);
 #ifndef _WIN32
-        // On Linux the guest window is reserved by libkernel's low arena, and the GuestArena
-        // span in libc is a Windows-only construct, so the range above comes back empty here.
+        // On Linux the guest window is reserved by libkernel's DirectMemory low arena, and
+        // GuestArena in libc is a Windows-only construct, so the range above is empty here.
         // Without a span to cache into, every guest-memory validation re-reads and re-parses
         // /proc/self/maps, which measured 50.8% of CPU while a title was playing.
         if (arena.size == 0) {
@@ -458,6 +465,66 @@ struct PageRun {
     bool readable;
     bool writable;
 };
+
+#ifndef _WIN32
+struct ProcHit {
+    bool covering = false;
+    bool hasNext = false;
+    bool readable = false;
+    bool writable = false;
+    std::uintptr_t end = 0;
+    std::uintptr_t nextStart = 0;
+};
+
+// Resolves `cursor` with one PROCMAP_QUERY ioctl: O(log n) kernel VMA lookup instead of a full
+// text scan of /proc/self/maps. Returns false when the ioctl is unavailable, so the caller falls
+// back to parsing. Returns true for a covering mapping, for the next mapping after a hole, and
+// for the case where no mapping follows the address.
+bool QueryProcMap(std::uintptr_t cursor, ProcHit& out) {
+    static const bool supported = [] {
+        const int probe = ::open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+        if (probe < 0) return false;
+        procmap_query request{};
+        request.size = sizeof request;
+        request.query_addr = static_cast<__u64>(reinterpret_cast<std::uintptr_t>(&QueryProcMap));
+        request.query_flags = PROCMAP_QUERY_COVERING_OR_NEXT_VMA;
+        const bool ok = ::ioctl(probe, PROCMAP_QUERY, &request) == 0 || errno == ENOENT;
+        ::close(probe);
+        if (!ok) std::fprintf(stderr, "[pmq] PROCMAP_QUERY unavailable errno=%d, using text parse\n", errno);
+        return ok;
+    }();
+    if (!supported) return false;
+
+    static const int mapsFd = [] {
+        for (;;) {
+            const int fd = ::open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) return fd;
+            if (errno != EINTR) return -1;
+        }
+    }();
+    if (mapsFd < 0) return false;
+
+    procmap_query request{};
+    request.size = sizeof request;
+    request.query_addr = static_cast<__u64>(cursor);
+    request.query_flags = PROCMAP_QUERY_COVERING_OR_NEXT_VMA;
+    if (::ioctl(mapsFd, PROCMAP_QUERY, &request) != 0) {
+        if (errno == ENOENT) return true;  // no mapping at or after cursor
+        return false;
+    }
+    out.covering = static_cast<std::uintptr_t>(request.vma_start) <= cursor &&
+                   cursor < static_cast<std::uintptr_t>(request.vma_end);
+    if (out.covering) {
+        out.readable = (request.vma_flags & PROCMAP_QUERY_VMA_READABLE) != 0;
+        out.writable = (request.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) != 0;
+        out.end = static_cast<std::uintptr_t>(request.vma_end);
+    } else {
+        out.hasNext = true;
+        out.nextStart = static_cast<std::uintptr_t>(request.vma_start);
+    }
+    return true;
+}
+#endif
 
 template <class Emit>
 bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
@@ -512,6 +579,35 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
         if (!emit(PageRun{cursor, next, readable, writable})) return true;
         cursor = next;
 #else
+        ProcHit hit;
+        if (QueryProcMap(cursor, hit)) {
+            if (hit.covering) {
+                if (hit.readable) {
+                    const auto generation = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+                    for (PageSpan* span : {&pages.arena, &pages.image}) {
+                        if (span->size == 0) continue;
+                        const auto from = std::max(cursor, span->base);
+                        const auto to = std::min(hit.end, span->base + span->size);
+                        if (to <= from) continue;
+                        const std::uint8_t value = PageReadable | (hit.writable ? PageWritable : 0u);
+                        for (auto at = from; at < to; at += PageBytes) span->store(at, value);
+                        if (GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) span->forget(from, to);
+                    }
+                }
+                const auto next = std::min(end, hit.end);
+                if (!emit(PageRun{cursor, next, hit.readable, hit.writable})) return true;
+                cursor = next;
+                continue;
+            }
+            // A hole at the cursor ends the walk, exactly as the text parse did: it emitted the
+            // remainder as unreadable rather than continuing into a later mapping.
+            if (hit.hasNext) {
+                static_cast<void>(emit(PageRun{cursor, end, false, false}));
+                return true;
+            }
+            static_cast<void>(emit(PageRun{cursor, end, false, false}));
+            return true;
+        }
         std::ifstream maps("/proc/self/maps");
         if (!maps.is_open()) return false;
         std::string line;
