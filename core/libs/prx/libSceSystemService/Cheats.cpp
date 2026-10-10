@@ -1392,14 +1392,14 @@ void SetFactor(Cheat& cheat, int next) {
     Announce(cheat, notice);
 }
 
-// In the order of the menu's combo box.
+// In the menu's order.
 constexpr int kFactors[] = {1, 2, 4, 6};
 
 // A click on PENDING turns the cheat back on; a click on FAILED retries the restore.
 void DrawToggle(const HostMenuWidgets& ui, Cheat& cheat, const char* label) {
     bool on = cheat.active.load();
     const HostControlState state = cheat.failed ? HostControlState::Failed : cheat.pending ? HostControlState::Pending : HostControlState::Normal;
-    if (!ui.checkbox(label, &on, cheat.available, state)) return;
+    if (!ui.toggle(label, &on, cheat.available, state)) return;
     SetToggle(cheat, on || cheat.pending);
 }
 
@@ -1410,14 +1410,14 @@ void DrawMultiplier(const HostMenuWidgets& ui, Cheat& cheat, const char* label) 
         items[i] = FactorText(kFactors[i]);
         if (kFactors[i] == cheat.factor->load()) index = static_cast<int>(i);
     }
-    if (!ui.combo(label, &index, items, static_cast<int>(std::size(items)), cheat.available, cheat.failed)) return;
+    if (!ui.choice(label, &index, items, static_cast<int>(std::size(items)), cheat.available, cheat.failed)) return;
     SetFactor(cheat, kFactors[index]);
 }
 
 void DrawAward(const HostMenuWidgets& ui, Award& award, const char* label, bool available) {
     const char* notice = award.notice.load();
     const char* status = notice != nullptr && NowMs() < award.noticeUntil.load() ? notice : "";
-    if (!ui.statusButton(label, status, available, awardsUnavailable.load() == kWalletStillPatched)) return;
+    if (!ui.action(label, status, available, awardsUnavailable.load() == kWalletStillPatched)) return;
     Request(award);
 }
 

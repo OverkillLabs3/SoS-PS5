@@ -14,9 +14,10 @@ enum class HostControlState { Normal, Pending, Failed };
 struct HostMenuWidgets {
     void (*heading)(const char* text);
     void (*separator)();
-    bool (*checkbox)(const char* label, bool* value, bool enabled, HostControlState state);
-    bool (*combo)(const char* label, int* index, const char* const* items, int count, bool enabled, bool failed);
-    bool (*statusButton)(const char* label, const char* status, bool enabled, bool failed);
+    bool (*toggle)(const char* label, bool* value, bool enabled, HostControlState state);
+    // items[0] is the off value.
+    bool (*choice)(const char* label, int* index, const char* const* items, int count, bool enabled, bool failed);
+    bool (*action)(const char* label, const char* status, bool enabled, bool failed);
 };
 using HostMenuDraw = void (*)(const HostMenuWidgets& widgets);
 
