@@ -18,6 +18,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <link.h>
 #endif
 
 namespace {
@@ -204,6 +205,38 @@ void* APS5_VABI dlopen_nid_postfix_impl(const char* path, int flags) {
         return reinterpret_cast<void*>(handle);
     } catch (const std::exception& error) { Error(error.what()); return nullptr; }
 }
+std::uintptr_t MainProgramBase() {
+    static const std::uintptr_t base = [] {
+        struct Scan {
+            std::uintptr_t value = 0;
+        };
+        Scan scan;
+        ::dl_iterate_phdr(
+            [](dl_phdr_info* info, size_t, void* data) {
+                auto* found = static_cast<Scan*>(data);
+                if (found->value == 0 && info->dlpi_name != nullptr && info->dlpi_name[0] == '\0') found->value = info->dlpi_addr;
+                return found->value == 0 ? 0 : 1;
+            },
+            &scan);
+        return scan.value;
+    }();
+    return base;
+}
+
+
+bool FromGuestModule(void* address) {
+    Dl_info info{};
+    if (address == nullptr || !::dladdr(address, &info) || info.dli_fname == nullptr) return false;
+    if (reinterpret_cast<std::uintptr_t>(info.dli_fbase) == MainProgramBase()) return true;
+    const std::string path(info.dli_fname);
+    return path.ends_with(".prx");
+}
+
+void* DefaultScopeSymbol(const char* symbolName) {
+    auto* result = ::dlsym(RTLD_DEFAULT, symbolName);
+    return FromGuestModule(result) ? result : nullptr;
+}
+
 void* APS5_VABI dlsym_nid_postfix_impl(void* handle, const char* name);
 void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name) {
     void* result = dlsym_nid_postfix_impl(handle, name);
@@ -238,9 +271,9 @@ void* APS5_VABI dlsym_nid_postfix_impl(void* handle, const char* name) {
         // the plain name and by its NID, which is how the guest libraries export their API. glibc
         // searches the executable first, which matches "handle 0 is the main program" on PS5.
         if (handle == nullptr || handle == reinterpret_cast<void*>(static_cast<std::intptr_t>(-2))) {
-            if (auto* result = ::dlsym(RTLD_DEFAULT, name)) return result;
+            if (auto* result = DefaultScopeSymbol(name)) return result;
             const auto nid = Nid::ComputeNid(name, "");
-            if (auto* result = ::dlsym(RTLD_DEFAULT, nid.c_str())) return result;
+            if (auto* result = DefaultScopeSymbol(nid.c_str())) return result;
         }
 #endif
         // A miss on a plain name is ambiguous: the guest may have asked for something that exists
