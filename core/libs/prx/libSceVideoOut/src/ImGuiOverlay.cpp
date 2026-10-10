@@ -2,7 +2,6 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_vulkan.h"
-#include "prx/common/CheatsEnabled.hpp"
 #include "prx/libkernel/HostExtension/include/HostExtension.hpp"
 #include <algorithm>
 #include <cfloat>
@@ -12,12 +11,9 @@
 
 namespace {
 
-bool ShowInGameFps() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("SOS_SHOW_IN_GAME_FPS");
-        return value != nullptr && std::strcmp(value, "1") == 0;
-    }();
-    return enabled;
+bool ShowInGameFpsAtLaunch() {
+    const char* value = std::getenv("SOS_SHOW_IN_GAME_FPS");
+    return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
 constexpr float kFontPixels = 18.0f;
@@ -189,16 +185,23 @@ bool Succeeded(VkResult result, const char* what) {
 
 }
 
+ImGuiOverlay::ImGuiOverlay() : showFps(ShowInGameFpsAtLaunch()) {}
+
 void ImGuiOverlay::Bind(SDL_Window* target) {
     window = target;
 }
 
 bool ImGuiOverlay::ToggleKeyPressed(const SDL_Event& event) {
-    if (!CheatsEnabled()) return false;
-    if (event.type != SDL_KEYDOWN || event.key.repeat != 0 || event.key.keysym.scancode != SDL_SCANCODE_F10) return false;
+    if (event.type != SDL_KEYDOWN || event.key.repeat != 0) return false;
+    const SDL_Scancode key = event.key.keysym.scancode;
+    if (key != SDL_SCANCODE_F9 && key != SDL_SCANCODE_F10) return false;
     if (window == nullptr || event.key.windowID != SDL_GetWindowID(window)) return false;
-    open = !open;
-    if (!open && state == State::Ready) ReleaseImGuiInput();
+    if (key == SDL_SCANCODE_F9) {
+        showFps = !showFps;
+    } else {
+        open = !open;
+        if (!open && state == State::Ready) ReleaseImGuiInput();
+    }
     return true;
 }
 
@@ -207,7 +210,7 @@ void ImGuiOverlay::ProcessEvent(const SDL_Event& event) {
 }
 
 bool ImGuiOverlay::Wanted(const AgcDriver::PresentationOverlayFrame& frame) {
-    if (!CheatsEnabled() && !ShowInGameFps()) return false;
+    if (!open && !showFps) return false;
     if (state == State::Unready) {
         const bool started = window != nullptr && start(frame);
         if (!started) {
@@ -218,7 +221,7 @@ bool ImGuiOverlay::Wanted(const AgcDriver::PresentationOverlayFrame& frame) {
             state = State::Ready;
         }
     }
-    return state == State::Ready && frame.device == device && (open || ShowInGameFps());
+    return state == State::Ready && frame.device == device;
 }
 
 void ImGuiOverlay::Record(const AgcDriver::PresentationOverlayFrame& frame) {
@@ -226,7 +229,7 @@ void ImGuiOverlay::Record(const AgcDriver::PresentationOverlayFrame& frame) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     if (open) drawMenu();
-    if (ShowInGameFps()) DrawFramesPerSecond(framesPerSecond);
+    if (showFps) DrawFramesPerSecond(framesPerSecond);
     ImGui::Render();
     const Target* target = targetFor(frame);
     if (target == nullptr) return;

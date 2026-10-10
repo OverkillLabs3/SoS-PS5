@@ -3,9 +3,7 @@
 
 #include <cstddef>
 
-// Lets one game-specific host library react to key presses in the game window and to each presented frame, without the window code
-// knowing that library. Keys are SDL scancodes.
-using HostKeyHandler = void (*)(int scancode);
+// Lets one game-specific host library react to each presented frame and fill the host's menu, without the window code knowing that library.
 using HostFrameTick = void (*)();
 
 // Pending: off, with its patch kept until the game no longer needs it. Failed: a patch behind the control could not be restored. Either
@@ -24,9 +22,7 @@ using HostMenuDraw = void (*)(const HostMenuWidgets& widgets);
 
 extern "C" {
 
-void HostExtensionRegister_nid_no_patch(HostKeyHandler keyHandler, HostFrameTick frameTick);
-// Called by the window for every new key press in the game window (auto-repeat excluded).
-void HostKeyPressed_nid_no_patch(int scancode);
+void HostExtensionRegisterFrameTick_nid_no_patch(HostFrameTick frameTick);
 // Called by the window once per presented frame.
 void HostFrameTick_nid_no_patch();
 void HostExtensionRegisterMenu_nid_no_patch(HostMenuDraw draw);
