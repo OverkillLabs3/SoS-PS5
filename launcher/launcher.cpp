@@ -55,7 +55,7 @@ const IniSection kStartupSection{L"startup", L"Startup"};
 const IniSection kQualitySection{L"quality_of_life", L"QualityOfLife"};
 const IniSection kIniSections[] = {kDisplaySection, kStartupSection, kQualitySection};
 struct IniKeyAlias { const wchar_t* legacy; const wchar_t* name; };
-const IniKeyAlias kIniKeyAliases[] = {{L"SkipDialogue", L"skip_dialogue"}, {L"RevealFullMap", L"reveal_full_map"}};
+const IniKeyAlias kIniKeyAliases[] = {{L"Mode", L"mode"}, {L"SkipDialogue", L"skip_dialogue"}, {L"RevealFullMap", L"reveal_full_map"}};
 // Settings of features the project no longer has. Nothing reads them; a save deletes them.
 const wchar_t* const kCheatsSection = L"Cheats";
 struct IniKey { const wchar_t* section; const wchar_t* key; };
@@ -63,20 +63,28 @@ const IniKey kObsoleteSettings[] = {{kCheatsSection, L"enable_cheats"}, {kCheats
                                     {kQualitySection.legacyName, L"LadderGrabWithUp"}, {kQualitySection.name, L"LadderGrabWithUp"}};
 
 // A canonical key wins over a historical one, then the canonical section over the historical one; the profile API ignores case.
-std::wstring ReadSetting(const std::wstring& directory, const IniSection& section, const wchar_t* key, const wchar_t* legacyKey,
-                         const wchar_t* fallback) {
+bool FindSetting(const std::wstring& directory, const IniSection& section, const wchar_t* key, const wchar_t* legacyKey, std::wstring& value) {
     const std::wstring path = directory + kLauncherIni;
     const wchar_t absent[] = L"\x01";
     const wchar_t* const keys[] = {key, legacyKey != nullptr ? legacyKey : key};
     const wchar_t* const sections[] = {section.name, section.legacyName};
     for (const wchar_t* keyName : keys) {
         for (const wchar_t* sectionName : sections) {
-            wchar_t value[64] = {};
-            GetPrivateProfileStringW(sectionName, keyName, absent, value, 64, path.c_str());
-            if (wcscmp(value, absent) != 0) return value;
+            wchar_t text[64] = {};
+            GetPrivateProfileStringW(sectionName, keyName, absent, text, 64, path.c_str());
+            if (wcscmp(text, absent) != 0) {
+                value = text;
+                return true;
+            }
         }
     }
-    return fallback;
+    return false;
+}
+
+std::wstring ReadSetting(const std::wstring& directory, const IniSection& section, const wchar_t* key, const wchar_t* legacyKey,
+                         const wchar_t* fallback) {
+    std::wstring value;
+    return FindSetting(directory, section, key, legacyKey, value) ? value : fallback;
 }
 
 bool ReadBorderless(const std::wstring& directory) {
@@ -274,6 +282,15 @@ bool MigrateIniFile(const std::wstring& directory) {
     const bool renamed = MigrateIniNames(directory);
     const bool removed = RemoveObsoleteSettings(directory);
     return renamed || removed;
+}
+
+const wchar_t* DisplayModeValue(bool borderless) { return borderless ? L"borderless" : L"windowed"; }
+
+// A missing mode counts as Windowed, so only Borderless is written into a file without one. Any other spelling is replaced by the canonical form.
+bool NeedsDisplayModeWrite(const std::wstring& directory, bool borderless) {
+    std::wstring stored;
+    if (!FindSetting(directory, kDisplaySection, L"mode", nullptr, stored)) return borderless;
+    return stored != DisplayModeValue(borderless);
 }
 
 // The settings file is kSettingsHeader followed by JSON text with every character stored as four bytes.
@@ -1163,7 +1180,7 @@ struct Launcher {
             iniChanged = true;
             return true;
         };
-        if (play && borderless != ReadBorderless(directory) && !saveIni(kDisplaySection.name, L"mode", borderless ? L"Borderless" : L"Windowed")) {
+        if (play && NeedsDisplayModeWrite(directory, borderless) && !saveIni(kDisplaySection.name, L"mode", DisplayModeValue(borderless))) {
             MessageBoxW(nullptr, L"The display mode could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
         if (play && skipIntro != ReadSkipIntro(directory) && !saveIni(kStartupSection.name, L"skip_intro", skipIntro ? L"1" : L"0")) {
