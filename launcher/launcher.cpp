@@ -489,26 +489,6 @@ BOOL CALLBACK FindGameWindow(HWND window, LPARAM parameter) {
     return TRUE;
 }
 
-// Borderless fullscreen is AnyPS5's own F11 toggle. Once the SDL game window is the active window and presents frames
-// (its title shows the FPS counter), one F11 press and release is posted to it. SDL turns them into its normal key
-// events, so its fullscreen state stays consistent and F11 keeps working both ways. If the game window does not become
-// the active window, nothing is sent, so keys are never sent to another window.
-void RequestFullscreen(const PROCESS_INFORMATION& process) {
-    for (int i = 0; i < 240 && WaitForSingleObject(process.hProcess, 250) == WAIT_TIMEOUT; ++i) {
-        HWND window = GetForegroundWindow();
-        DWORD owner = 0;
-        wchar_t name[16] = {};
-        wchar_t title[256] = {};
-        GetWindowThreadProcessId(window, &owner);
-        if (owner != process.dwProcessId || GetClassNameW(window, name, 16) == 0 || wcscmp(name, L"SDL_app") != 0) continue;
-        if (GetWindowTextW(window, title, 256) == 0 || wcsstr(title, L" | FPS: ") == nullptr) continue;
-        const LPARAM scan = static_cast<LPARAM>(MapVirtualKeyW(VK_F11, MAPVK_VK_TO_VSC)) << 16;
-        PostMessageW(window, WM_KEYDOWN, VK_F11, scan | 1);
-        PostMessageW(window, WM_KEYUP, VK_F11, scan | 1 | 0xC0000000);
-        return;
-    }
-}
-
 bool ConvertOrCopy(const std::wstring& from, const std::wstring& to) {
     if (IsElf(from)) return CopyFileW(from.c_str(), to.c_str(), FALSE) != 0;
     return ExtractSelf(from, to);
@@ -1241,7 +1221,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             fclose(debug);
         }
     }
-    // The runtime reads these choices from its environment; an option that is off has no variable, so an inherited value cannot turn it on.
+    // The runtime reads these choices from its environment; an option that is off is unset or 0, so an inherited value cannot turn it on.
+    SetEnvironmentVariableW(L"SOS_START_BORDERLESS", borderless ? L"1" : L"0");
     SetEnvironmentVariableW(L"SOS_SKIP_INTRO", skipIntro ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_SKIP_DIALOGUE", skipDialogue ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_LADDER_GRAB_WITH_UP", ladderGrabWithUp ? L"1" : nullptr);
@@ -1269,7 +1250,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             EnumWindows(FindGameWindow, reinterpret_cast<LPARAM>(&search));
         }
     }
-    if (borderless) RequestFullscreen(process);
 
     bool hung = false;
     WaitForSingleObject(process.hProcess, INFINITE);

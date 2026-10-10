@@ -51,7 +51,7 @@ F11 toggles fullscreen. The middle mouse button turns mouse-aim mode on or off (
 ## Display settings
 The window that opens when you start `SonsOfSparta-PS5.exe` has two display settings. Press Play to save them; they are kept for later starts.
 
-**Display mode:** Windowed or Borderless Fullscreen. With Borderless Fullscreen, the launcher switches the game window to fullscreen once it appears, the same as pressing F11. F11 still switches between the two while playing. The choice is stored in `launcher.ini`.
+**Display mode:** Windowed or Borderless Fullscreen. With Borderless Fullscreen, the game window opens directly in fullscreen. F11 still switches between the two while playing. The choice is stored in `launcher.ini`.
 
 **Resolution:** the game draws its scene at 4K by default and scales it to your window, which is heavy on weaker graphics cards. To lower it, choose 2560 x 1440 or 1920 x 1080. The choice is saved in the game's own settings. The window size is not affected.
 

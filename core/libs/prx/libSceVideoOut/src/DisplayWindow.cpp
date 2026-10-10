@@ -5,6 +5,8 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "SDL_vulkan.h"
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <vector>
@@ -30,6 +32,11 @@ void require(bool condition, const char* reason) {
 constexpr UINT_PTR DisplayWindowSubclassId = 0x41505335u;
 #endif
 
+bool StartBorderless() {
+    const char* value = std::getenv("SOS_START_BORDERLESS");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
 }
 
 DisplayWindow::~DisplayWindow() {
@@ -52,8 +59,11 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     const auto initialSize = AgcDriver::ComputeContainSize_nid_postfix(sourceWidth, sourceHeight, boundsWidth, boundsHeight, true);
     require(initialSize.width >= DisplayWindowMinimumWidth && initialSize.height >= DisplayWindowMinimumHeight, "initial window extent is smaller than the minimum");
     const auto title = GetAppTitle_nid_postfix();
-    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    const auto fullscreen = StartBorderless() ? static_cast<Uint32>(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u;
+    // SDL keeps the centered size as the windowed size even when starting fullscreen, so F11 still restores the usual window.
+    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | fullscreen);
     require(window != nullptr, SDL_GetError());
+    lastMouseMotion = SDL_GetTicks64();
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
 
     SDL_StopTextInput();
