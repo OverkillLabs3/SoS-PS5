@@ -9,4 +9,7 @@ enum class XboxPromptAssetsResult { Patched, AlreadyPatched, Failed };
 // gameFolder is only read. report receives one line per step, for the log.
 XboxPromptAssetsResult PatchXboxPromptAssets(const std::wstring& gameFolder, const std::wstring& outputBundle, std::string& report);
 
+// True when the bundle at that path is the analysed game bundle with the complete Xbox left-stick prompt set. It is only read.
+bool HasXboxPromptAssets(const std::wstring& bundle);
+
 #endif

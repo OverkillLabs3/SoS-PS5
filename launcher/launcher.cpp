@@ -699,17 +699,21 @@ const wchar_t* const kIconsGuestPath = L"app0/Media/StreamingAssets/aa/PS5/defau
 
 std::wstring IconsPrepared(const std::wstring& directory) { return directory + L"\\prep\\controller_icons.bundle"; }
 
-// The launcher's size changes with the patch code, so a new build prepares the bundle again.
-std::wstring IconsStamp(const std::wstring& directory, const std::wstring& launcher) {
+// Increase when the patch writes different bundle content, so prepared copies from older launchers are rebuilt.
+constexpr int kControllerIconsPatchVersion = 1;
+
+std::wstring IconsStamp(const std::wstring& directory) {
     const FILETIME time = WriteTime(directory + kIconsBundle);
     const unsigned long long written = (static_cast<unsigned long long>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
-    return L"1 " + std::to_wstring(FileSize(directory + kIconsBundle)) + L" " + std::to_wstring(written) + L" " + std::to_wstring(FileSize(launcher));
+    return L"icons " + std::to_wstring(kControllerIconsPatchVersion) + L" " + std::to_wstring(FileSize(directory + kIconsBundle)) + L" " + std::to_wstring(written);
 }
 
 // "complete" means the game's bundle already has the icons and no copy is needed.
 bool IconsCurrent(const std::wstring& directory, const std::wstring& stamp) {
     const std::wstring saved = ReadStamp(directory + L"\\prep\\controller_icons.stamp");
-    return saved == stamp + L" complete" || (saved == stamp + L" prepared" && Exists(IconsPrepared(directory)));
+    if (saved == stamp + L" prepared") return HasXboxPromptAssets(IconsPrepared(directory));
+    if (saved == stamp + L" complete") return HasXboxPromptAssets(directory + kIconsBundle);
+    return false;
 }
 
 void WriteLog(const std::wstring& path, const std::string& text) {
@@ -770,6 +774,7 @@ struct Splash {
     HFONT fonts[5] = {};
     ULONGLONG started = 0, shown = ~0ull;
     UINT currentDpi = USER_DEFAULT_SCREEN_DPI;
+    bool iconsOnly = false;
     template <typename Function> static Function User32(const char* name) {
         return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
     }
@@ -925,11 +930,16 @@ struct Splash {
         auto label = [&](const wchar_t* text, DWORD style) {
             return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_NOPREFIX | style, 0, 0, 0, 0, self->window, nullptr, windowClass.hInstance, nullptr);
         };
-        self->title = label(L"Preparing the game for first launch", 0);
-        self->intro = label(L"The game is being prepared from your own files\nThis only happens once, usually takes around two minutes\nand does not require an internet connection", 0);
+        if (self->iconsOnly) {
+            self->title = label(L"Preparing controller button icons", 0);
+            self->intro = label(L"This is a one-time setup.", 0);
+        } else {
+            self->title = label(L"Preparing the game for first launch", 0);
+            self->intro = label(L"The game is being prepared from your own files\nThis only happens once, usually takes around two minutes\nand does not require an internet connection", 0);
+        }
         self->progress = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_MARQUEE, 0, 0, 0, 0, self->window, nullptr, windowClass.hInstance, nullptr);
         SendMessageW(self->progress, PBM_SETMARQUEE, TRUE, 0);
-        self->status = label(L"Preparing game modules...", SS_ENDELLIPSIS);
+        self->status = label(self->iconsOnly ? L"Preparing controller button icons..." : L"Preparing game modules...", SS_ENDELLIPSIS);
         self->elapsed = label(L"", SS_ENDELLIPSIS);
         self->note = label(L"Please keep this window open", 0);
         self->Tick();
@@ -1377,10 +1387,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const std::wstring stampOld = ReadStamp(stampFile);
     if (Exists(runtime) && stampOld.empty()) WriteStamp(stampFile, stampNow);
     const bool stale = !Exists(runtime) || (!stampOld.empty() && stampOld != stampNow);
-    const std::wstring iconsStamp = IconsStamp(directory, modulePath);
+    const std::wstring iconsStamp = IconsStamp(directory);
     const bool iconsStale = !IconsCurrent(directory, iconsStamp);
+    const bool iconsWork = iconsStale && !HasXboxPromptAssets(directory + kIconsBundle);
     Splash splash;
-    if (stale || iconsStale) splash.Start();
+    splash.iconsOnly = !stale;
+    if (stale || iconsWork) splash.Start();
     if (stale) {
         {
             std::wstring failed;
@@ -1416,7 +1428,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         WriteStamp(stampFile, stampNow);
     }
     if (iconsStale) {
-        splash.Status(L"Preparing controller button icons...");
+        if (iconsWork) splash.Status(L"Preparing controller button icons...");
         if (!PrepareIcons(directory, iconsStamp)) {
             splash.Close();
             Fail(L"Failed to prepare Xbox controller button icons.\n\nSee logs\\controller-icons.log.");

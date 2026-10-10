@@ -1103,7 +1103,7 @@ std::int64_t NewPathId(const SerializedFile& file, const std::string& name, cons
 bool IsXboxStickName(const std::string& name) { return name.rfind("Xbox_LeftStick_", 0) == 0; }
 
 // Confirms the bundle holds the analysed objects and relations, and decides what to copy where. Nothing is changed.
-Plan Analyse(const Bundle& bundle, const SerializedFile& file) {
+Plan Analyse(const Bundle& bundle, const SerializedFile& file, bool detectOnly = false) {
     Plan plan;
     const std::int64_t icon = FindNamed(file, kMonoBehaviourClass, "PS5InputIconData");
     const std::int64_t xboxAtlasId = FindNamed(file, kMonoBehaviourClass, "Xbox_ButtonPromptsAtlas");
@@ -1145,6 +1145,7 @@ Plan Analyse(const Bundle& bundle, const SerializedFile& file) {
         plan.patched = true;
         return plan;
     }
+    if (detectOnly) return plan;
     Require(tokens == 0 && characters == 0 && sprites == 0, "the Xbox prompt set is only partly patched");
     Require(xboxIcons.size() == 1 && xboxIcons[0].first == "!LookInput" && xboxIcons[0].second == kLookInputSprite, "the Xbox special icon map is not the analysed one");
 
@@ -1399,6 +1400,14 @@ __attribute__((format(printf, 2, 3))) void Note(std::string& report, const char*
     report += line;
 }
 
+void Load(const fs::path& bundlePath, Bundle& bundle, SerializedFile& file) {
+    Require(ReadFile(bundlePath, bundle.file), "the bundle could not be read: " + bundlePath.string());
+    bundle.Parse();
+    Require(bundle.nodes[0].name.rfind("CAB-", 0) == 0 && (bundle.nodes[0].flags & 4) != 0, "the first bundle node is not a serialized file");
+    file.data = bundle.ReadNode(bundle.nodes[0]);
+    file.Parse();
+}
+
 XboxPromptAssetsResult Patch(const fs::path& gameFolder, const fs::path& outputBundle, std::string& report) {
     std::error_code error;
     Require(fs::is_directory(gameFolder, error), "the game folder does not exist: " + gameFolder.string());
@@ -1407,12 +1416,8 @@ XboxPromptAssetsResult Patch(const fs::path& gameFolder, const fs::path& outputB
     Require(!(fs::exists(outputBundle, error) && fs::equivalent(bundlePath, outputBundle, error)), "the output file is the game's bundle: " + outputBundle.string());
 
     Bundle bundle;
-    Require(ReadFile(bundlePath, bundle.file), "the bundle could not be read: " + bundlePath.string());
-    bundle.Parse();
-    Require(bundle.nodes[0].name.rfind("CAB-", 0) == 0 && (bundle.nodes[0].flags & 4) != 0, "the first bundle node is not a serialized file");
     SerializedFile file;
-    file.data = bundle.ReadNode(bundle.nodes[0]);
-    file.Parse();
+    Load(bundlePath, bundle, file);
 
     Note(report, "Bundle %s\n", bundlePath.string().c_str());
     Note(report, "UnityFS %u (%s), flags 0x%x, %s blocks: %llu, nodes: %llu, serialized node %s (%llu types, %llu objects)\n", bundle.version, bundle.engine.c_str(), bundle.flags,
@@ -1482,4 +1487,15 @@ XboxPromptAssetsResult PatchXboxPromptAssets(const std::wstring& gameFolder, con
         report += std::string("unexpected error: ") + exception.what() + "\n";
     }
     return XboxPromptAssetsResult::Failed;
+}
+
+bool HasXboxPromptAssets(const std::wstring& bundle) {
+    try {
+        Bundle parsed;
+        SerializedFile file;
+        Load(fs::path(bundle), parsed, file);
+        return Analyse(parsed, file, true).patched;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
