@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <exception>
 #include "SceTypes.hpp"
+#include "prx/libScePad/include/PadControllerKind.hpp"
 
 struct PadTouchPoint {
     bool active = false;
@@ -26,7 +27,7 @@ struct PadInputState {
     std::array<float, 3> accel{0.0f, 9.80665f, 0.0f};
     std::array<float, 3> gyro{0.0f, 0.0f, 0.0f};
     std::array<PadTouchPoint, 2> touch{};
-    std::uint8_t deviceKind = 0;
+    PadControllerKind deviceKind = PadControllerKind::None;
 };
 
 struct PadTriggerRequest {

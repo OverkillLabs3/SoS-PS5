@@ -14,6 +14,7 @@ using std::min;
 #include <gdiplus.h>
 #include <psapi.h>
 #include <cstdio>
+#include "XboxPromptAssets.hpp"
 
 #define LAUNCHER_TITLE L"SonsOfSparta-PS5 Native"
 #define LAUNCHER_NAME L"God of War Sons of Sparta"
@@ -54,6 +55,8 @@ const IniSection kDisplaySection{L"display", L"Display"};
 const IniSection kStartupSection{L"startup", L"Startup"};
 const IniSection kQualitySection{L"quality_of_life", L"QualityOfLife"};
 const IniSection kIniSections[] = {kDisplaySection, kStartupSection, kQualitySection};
+// Not in kIniSections: that list drives the historical-name migration, and this section has no historical name.
+const IniSection kControllerSection{L"controller", L"controller"};
 struct IniKeyAlias { const wchar_t* legacy; const wchar_t* name; };
 const IniKeyAlias kIniKeyAliases[] = {{L"Mode", L"mode"}, {L"SkipDialogue", L"skip_dialogue"}, {L"RevealFullMap", L"reveal_full_map"}};
 // Settings of features the project no longer has. Nothing reads them; a save deletes them.
@@ -123,6 +126,16 @@ bool ReadIniText(const std::wstring& path, std::string& text) {
     while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) text.append(buffer, count);
     fclose(file);
     return text.rfind("\xFF\xFE", 0) != 0;
+}
+
+// Controller Button Icons, in combo order: Automatic, PlayStation, Xbox. A missing or unknown value is Automatic.
+const wchar_t* const kButtonIcons[] = {L"automatic", L"playstation", L"xbox"};
+
+int ReadButtonIcons(const std::wstring& directory) {
+    const std::wstring value = ReadSetting(directory, kControllerSection, L"button_icons", nullptr, kButtonIcons[0]);
+    if (value == kButtonIcons[1]) return 1;
+    if (value == kButtonIcons[2]) return 2;
+    return 0;
 }
 
 // The profile API adds a new section right below the last line. After Play has saved, every section header but the first is
@@ -680,6 +693,55 @@ void PrepareModules(const std::wstring& directory, const std::wstring& prep, std
     }
 }
 
+// The Xbox prompt icons are added to a copy of the game's Addressables bundle kept in prep; the game's own files are not changed.
+const wchar_t* const kIconsBundle = L"\\Media\\StreamingAssets\\aa\\PS5\\defaultlocalgroup_assets_.bundle";
+const wchar_t* const kIconsGuestPath = L"app0/Media/StreamingAssets/aa/PS5/defaultlocalgroup_assets_.bundle";
+
+std::wstring IconsPrepared(const std::wstring& directory) { return directory + L"\\prep\\controller_icons.bundle"; }
+
+// The launcher's size changes with the patch code, so a new build prepares the bundle again.
+std::wstring IconsStamp(const std::wstring& directory, const std::wstring& launcher) {
+    const FILETIME time = WriteTime(directory + kIconsBundle);
+    const unsigned long long written = (static_cast<unsigned long long>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    return L"1 " + std::to_wstring(FileSize(directory + kIconsBundle)) + L" " + std::to_wstring(written) + L" " + std::to_wstring(FileSize(launcher));
+}
+
+// "complete" means the game's bundle already has the icons and no copy is needed.
+bool IconsCurrent(const std::wstring& directory, const std::wstring& stamp) {
+    const std::wstring saved = ReadStamp(directory + L"\\prep\\controller_icons.stamp");
+    return saved == stamp + L" complete" || (saved == stamp + L" prepared" && Exists(IconsPrepared(directory)));
+}
+
+void WriteLog(const std::wstring& path, const std::string& text) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || file == nullptr) return;
+    fwrite(text.data(), 1, text.size(), file);
+    fclose(file);
+}
+
+bool PrepareIcons(const std::wstring& directory, const std::wstring& stamp) {
+    const std::wstring stampFile = directory + L"\\prep\\controller_icons.stamp";
+    const std::wstring output = directory + L"\\prep\\controller_icons_new.bundle";
+    const std::wstring prepared = IconsPrepared(directory);
+    CreateDirectoryW((directory + L"\\prep").c_str(), nullptr);
+    DeleteFileW(stampFile.c_str());
+    DeleteFileW(output.c_str());
+    std::string report;
+    const XboxPromptAssetsResult result = PatchXboxPromptAssets(directory, output, report);
+    WriteLog(directory + L"\\logs\\controller-icons.log", report);
+    bool done = false;
+    if (result == XboxPromptAssetsResult::Patched) {
+        done = MoveFileExW(output.c_str(), prepared.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+        if (done) WriteStamp(stampFile, stamp + L" prepared");
+    } else if (result == XboxPromptAssetsResult::AlreadyPatched) {
+        DeleteFileW(prepared.c_str());
+        WriteStamp(stampFile, stamp + L" complete");
+        done = true;
+    }
+    DeleteFileW(output.c_str());
+    return done;
+}
+
 void LinkIntoApp0(const std::wstring& directory, const wchar_t* name) {
     const std::wstring link = directory + L"\\app0\\" + name;
     if (!Exists(directory + L"\\" + name)) return;
@@ -907,7 +969,8 @@ struct Launcher {
     static constexpr int kWorkAreaMargin = 24;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors. The Quality of Life section includes the two-line Skip dialogue hint.
-    static constexpr int kQualityTop = 310, kQualityRows = 4, kSkipDialogueHint = 50;
+    static constexpr int kControllerTop = 310, kControllerHeight = 70;
+    static constexpr int kQualityTop = kControllerTop + kControllerHeight + 12, kQualityRows = 4, kSkipDialogueHint = 50;
     static constexpr int kQualityHeight = 70 + 32 * (kQualityRows - 1) + kSkipDialogueHint;
     static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 66, kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 620, kHeight = kButtonsTop + 48;
@@ -919,6 +982,8 @@ struct Launcher {
     HWND resolution = nullptr;
     HWND frameRate = nullptr;
     int frameRateChoice = 0;
+    HWND buttonIcons = nullptr;
+    int buttonIconsChoice = 0;
     HWND skip = nullptr;
     HWND skipDialogueBox = nullptr;
     HWND revealFullMapBox = nullptr;
@@ -1036,6 +1101,7 @@ struct Launcher {
             self->play = LOWORD(wParam) == IDOK;
             self->borderless = SendMessageW(self->mode, CB_GETCURSEL, 0, 0) == 1;
             self->frameRateChoice = static_cast<int>(SendMessageW(self->frameRate, CB_GETCURSEL, 0, 0));
+            self->buttonIconsChoice = static_cast<int>(SendMessageW(self->buttonIcons, CB_GETCURSEL, 0, 0));
             self->skipIntro = SendMessageW(self->skip, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->skipDialogue = SendMessageW(self->skipDialogueBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->revealFullMap = SendMessageW(self->revealFullMapBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -1056,6 +1122,7 @@ struct Launcher {
         borderless = ReadBorderless(directory);
         skipIntro = ReadSkipIntro(directory);
         frameRateChoice = ReadFrameRate(directory);
+        buttonIconsChoice = ReadButtonIcons(directory);
         skipDialogue = ReadSkipDialogue(directory);
         revealFullMap = ReadRevealFullMap(directory);
         showInGameFps = ReadShowInGameFps(directory);
@@ -1114,6 +1181,9 @@ struct Launcher {
         // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
         control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 214, 352, 24, 0, font);
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 246, 352, 48, 0, font);
+        control(L"BUTTON", L"Controller", BS_GROUPBOX, 24, kControllerTop, kWidth - 48, kControllerHeight, 0, font);
+        control(L"STATIC", L"Controller Button Icons", SS_CENTERIMAGE, 44, kControllerTop + 30, 176, 28, 0, font);
+        buttonIcons = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 224, kControllerTop + 30, 172, 200, 104, font);
         control(L"BUTTON", L"Quality of Life", BS_GROUPBOX, 24, kQualityTop, kWidth - 48, kQualityHeight, 0, font);
         showInGameFpsBox = checkBox(L"Show in-game FPS (F9)", 44, kQualityTop + 30, kWidth - 88, 113);
         skip = checkBox(L"Skip intro", 44, kQualityTop + 30 + 32, kWidth - 88, 102);
@@ -1134,6 +1204,10 @@ struct Launcher {
         SendMessageW(frameRate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"120 FPS"));
         SendMessageW(frameRate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Unlocked (experimental)"));
         SendMessageW(frameRate, CB_SETCURSEL, frameRateChoice, 0);
+        SendMessageW(buttonIcons, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Automatic (Default)"));
+        SendMessageW(buttonIcons, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"PlayStation"));
+        SendMessageW(buttonIcons, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Xbox"));
+        SendMessageW(buttonIcons, CB_SETCURSEL, buttonIconsChoice, 0);
         SendMessageW(skip, BM_SETCHECK, skipIntro ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(skipDialogueBox, BM_SETCHECK, skipDialogue ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(revealFullMapBox, BM_SETCHECK, revealFullMap ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1173,7 +1247,7 @@ struct Launcher {
                 MoveFileExW((directory + L"\\resolution.txt").c_str(), (directory + L"\\resolution.txt.old").c_str(), MOVEFILE_REPLACE_EXISTING);
             }
         }
-        // A new section is appended where it is first written, so the writes follow the window: display, startup, quality_of_life.
+        // A new section is appended where it is first written, so the writes follow the window: display, controller, startup, quality_of_life.
         bool iniChanged = false;
         const auto saveIni = [&](const wchar_t* section, const wchar_t* key, const wchar_t* value) {
             if (!WritePrivateProfileStringW(section, key, value, (directory + kLauncherIni).c_str())) return false;
@@ -1182,6 +1256,9 @@ struct Launcher {
         };
         if (play && NeedsDisplayModeWrite(directory, borderless) && !saveIni(kDisplaySection.name, L"mode", DisplayModeValue(borderless))) {
             MessageBoxW(nullptr, L"The display mode could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
+        }
+        if (play && buttonIconsChoice != ReadButtonIcons(directory) && !saveIni(kControllerSection.name, L"button_icons", kButtonIcons[buttonIconsChoice])) {
+            MessageBoxW(nullptr, L"The Controller Button Icons setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
         if (play && skipIntro != ReadSkipIntro(directory) && !saveIni(kStartupSection.name, L"skip_intro", skipIntro ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Skip intro setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
@@ -1281,6 +1358,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     bool revealFullMap = false;
     bool showInGameFps = false;
     int frameRateChoice = 0;
+    int buttonIconsChoice = 0;
     {
         Launcher launcher;
         if (!launcher.Run(directory, gameIcon)) return 0;
@@ -1290,6 +1368,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         revealFullMap = launcher.revealFullMap;
         showInGameFps = launcher.showInGameFps;
         frameRateChoice = launcher.frameRateChoice;
+        buttonIconsChoice = launcher.buttonIconsChoice;
     }
 
     const std::wstring runtime = directory + L"\\" + kRuntime;
@@ -1298,9 +1377,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const std::wstring stampOld = ReadStamp(stampFile);
     if (Exists(runtime) && stampOld.empty()) WriteStamp(stampFile, stampNow);
     const bool stale = !Exists(runtime) || (!stampOld.empty() && stampOld != stampNow);
+    const std::wstring iconsStamp = IconsStamp(directory, modulePath);
+    const bool iconsStale = !IconsCurrent(directory, iconsStamp);
+    Splash splash;
+    if (stale || iconsStale) splash.Start();
     if (stale) {
-        Splash splash;
-        splash.Start();
         {
             std::wstring failed;
             PrepareModules(directory, directory + L"\\prep", failed);
@@ -1334,6 +1415,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         SetFileAttributesW(registry.c_str(), FILE_ATTRIBUTE_HIDDEN);
         WriteStamp(stampFile, stampNow);
     }
+    if (iconsStale) {
+        splash.Status(L"Preparing controller button icons...");
+        if (!PrepareIcons(directory, iconsStamp)) {
+            splash.Close();
+            Fail(L"Failed to prepare Xbox controller button icons.\n\nSee logs\\controller-icons.log.");
+            return 1;
+        }
+    }
+    splash.Close();
 
     for (const wchar_t* name : {L"Media", L"sce_sys"}) LinkIntoApp0(directory, name);
 
@@ -1372,6 +1462,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     SetEnvironmentVariableW(L"APS5_VBLANK_HZ", frameRateChoice >= 1 ? L"1000" : nullptr);
     SetEnvironmentVariableW(L"APS5_FPS_CAP", frameRateChoice == 1 ? L"120" : nullptr);
     SetEnvironmentVariableW(L"SOS_SHOW_IN_GAME_FPS", showInGameFps ? L"1" : nullptr);
+    SetEnvironmentVariableW(L"SOS_CONTROLLER_BUTTON_ICONS", buttonIconsChoice != 0 ? kButtonIcons[buttonIconsChoice] : nullptr);
+    const std::wstring preparedIcons = IconsPrepared(directory);
+    const std::wstring iconsAlias = std::wstring(kIconsGuestPath) + L"|" + preparedIcons;
+    SetEnvironmentVariableW(L"SOS_PATH_ALIAS", Exists(preparedIcons) ? iconsAlias.c_str() : nullptr);
     PROCESS_INFORMATION process{};
     std::wstring command = L"\"" + runtime + L"\"";
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process)) {

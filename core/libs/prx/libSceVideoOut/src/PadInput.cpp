@@ -15,6 +15,20 @@
 #include "prx/libScePad/include/PadInputTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
+namespace {
+
+PadControllerKind ClassifyController(SDL_GameControllerType type) {
+    switch (type) {
+        case SDL_CONTROLLER_TYPE_PS5: return PadControllerKind::PlayStation5;
+        case SDL_CONTROLLER_TYPE_PS4: return PadControllerKind::PlayStation4;
+        case SDL_CONTROLLER_TYPE_XBOX360:
+        case SDL_CONTROLLER_TYPE_XBOXONE: return PadControllerKind::Xbox;
+        default: return PadControllerKind::Other;
+    }
+}
+
+}
+
 PadInput::PadInput()
     : bindings(Pad::LoadInputMapping()), pressed(bindings.size()), wheelReleaseTimes(bindings.size()) {
     openFirstAvailableController();
@@ -275,11 +289,7 @@ PadInputState PadInput::sampleController() const {
         stickValue(SDL_CONTROLLER_AXIS_RIGHTX),
         stickValue(SDL_CONTROLLER_AXIS_RIGHTY)
     };
-    switch (SDL_GameControllerGetType(controller)) {
-        case SDL_CONTROLLER_TYPE_PS5: result.deviceKind = 1; break;
-        case SDL_CONTROLLER_TYPE_PS4: result.deviceKind = 2; break;
-        default: result.deviceKind = 3; break;
-    }
+    result.deviceKind = ClassifyController(SDL_GameControllerGetType(controller));
     if (SDL_GameControllerIsSensorEnabled(controller, SDL_SENSOR_ACCEL) == SDL_TRUE && SDL_GameControllerIsSensorEnabled(controller, SDL_SENSOR_GYRO) == SDL_TRUE) {
         float accel[3];
         float gyro[3];

@@ -46,6 +46,8 @@ F11 toggles fullscreen. The middle mouse button turns mouse-aim mode on or off (
 
 F10 opens and closes the In-Game Cheat Menu on the right side of the screen, which is mouse and keyboard usable. Every cheat and item action is controlled from this menu, and every cheat starts off each time the game starts. Closing the menu with its X button or F10 does not turn any active cheat off. While the menu is open the game receives no controller, keyboard or mouse input. F11 always toggles Borderless Fullscreen, and F12 is unused.
 
+**Controller Button Icons** in the launcher chooses the button icons shown in game. **Automatic** (the default) shows Xbox icons when an Xbox controller is connected and PlayStation icons otherwise; **PlayStation** and **Xbox** always show that set. Only the icons change, not the controls.
+
 **Show in-game FPS** is a launcher Quality of Life option. It is off by default and draws the frame rate in the top-left corner of the game. F9 shows or hides it while playing; the next start uses the launcher setting again. It does not block any input. The frame rate in the window title bar is separate and always shown.
 
 ## Display settings

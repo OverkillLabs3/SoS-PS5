@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #ifdef _WIN32
+#include "prx/libScePad/include/PadControllerChannel.hpp"
 void SkipDialogueCrossPressed();  // SkipDialogueInput.cpp
 #endif
 
@@ -288,6 +289,9 @@ extern "C" void PadPublishInput_nid_postfix(const PadInputState& input) {
 #endif
     state = input;
     timestamp = sceKernelGetProcessTime();
+#ifdef _WIN32
+    PadControllerChannel::Publish(input.deviceKind);
+#endif
 }
 
 extern "C" void PadReportInputFailure_nid_postfix(std::exception_ptr error) {
