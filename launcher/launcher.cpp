@@ -48,79 +48,88 @@ const Resolution kResolutions[] = {{0, L"3840 x 2160 (4K)"}, {6, L"2560 x 1440 (
 // Host settings that do not belong in the game's save, read with the Windows profile API from launcher.ini.
 const wchar_t* kLauncherIni = L"\\launcher.ini";
 
-// Legacy cheat variables are kept out of the game's environment; the game reads only SOS_CHEATS_ENABLED.
-const wchar_t* const kLegacyCheatVariables[] = {L"SOS_CHEAT_MENU", L"SOS_GOD_MODE", L"SOS_INFINITE_SPARTAN_SPIRIT", L"SOS_INFINITE_MAGIC",
-                                                L"SOS_DAMAGE_MULTIPLIER", L"SOS_MOVEMENT_SPEED", L"SOS_JUMP_HEIGHT", L"SOS_JUMP_HEIGHT_MULTIPLIER",
-                                                L"SOS_PASS_THROUGH_GATES"};
+// Canonical names are lowercase snake_case. A historical name is read only where the canonical one is missing, and saving renames it.
+struct IniSection { const wchar_t* name; const wchar_t* legacyName; };
+const IniSection kDisplaySection{L"display", L"Display"};
+const IniSection kStartupSection{L"startup", L"Startup"};
+const IniSection kQualitySection{L"quality_of_life", L"QualityOfLife"};
+const IniSection kIniSections[] = {kDisplaySection, kStartupSection, kQualitySection};
+struct IniKeyAlias { const wchar_t* legacy; const wchar_t* name; };
+const IniKeyAlias kIniKeyAliases[] = {{L"Mode", L"mode"}, {L"SkipDialogue", L"skip_dialogue"}, {L"RevealFullMap", L"reveal_full_map"}};
+// Settings of features the project no longer has. Nothing reads them; a save deletes them.
+const wchar_t* const kCheatsSection = L"Cheats";
+struct IniKey { const wchar_t* section; const wchar_t* key; };
+const IniKey kObsoleteSettings[] = {{kCheatsSection, L"enable_cheats"}, {kCheatsSection, L"enable_cheat_menu"},
+                                    {kQualitySection.legacyName, L"LadderGrabWithUp"}, {kQualitySection.name, L"LadderGrabWithUp"}};
 
-// The default is a value no one stores, so it comes back only when there is no such key.
-bool HasSetting(const std::wstring& directory, const wchar_t* key) {
-    wchar_t value[2] = {};
-    GetPrivateProfileStringW(L"Cheats", key, L"\x01", value, 2, (directory + kLauncherIni).c_str());
-    return value[0] != L'\x01';
+// A canonical key wins over a historical one, then the canonical section over the historical one; the profile API ignores case.
+bool FindSetting(const std::wstring& directory, const IniSection& section, const wchar_t* key, const wchar_t* legacyKey, std::wstring& value) {
+    const std::wstring path = directory + kLauncherIni;
+    const wchar_t absent[] = L"\x01";
+    const wchar_t* const keys[] = {key, legacyKey != nullptr ? legacyKey : key};
+    const wchar_t* const sections[] = {section.name, section.legacyName};
+    for (const wchar_t* keyName : keys) {
+        for (const wchar_t* sectionName : sections) {
+            wchar_t text[64] = {};
+            GetPrivateProfileStringW(sectionName, keyName, absent, text, 64, path.c_str());
+            if (wcscmp(text, absent) != 0) {
+                value = text;
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
-bool ReadCheatsEnabled(const std::wstring& directory) {
-    wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"Cheats", L"enable_cheats", L"0", value, 8, (directory + kLauncherIni).c_str());
-    return wcscmp(value, L"1") == 0;
+std::wstring ReadSetting(const std::wstring& directory, const IniSection& section, const wchar_t* key, const wchar_t* legacyKey,
+                         const wchar_t* fallback) {
+    std::wstring value;
+    return FindSetting(directory, section, key, legacyKey, value) ? value : fallback;
 }
 
 bool ReadBorderless(const std::wstring& directory) {
-    wchar_t mode[32] = {};
-    GetPrivateProfileStringW(L"Display", L"mode", L"Windowed", mode, 32, (directory + kLauncherIni).c_str());
-    return _wcsicmp(mode, L"Borderless") == 0;
+    return _wcsicmp(ReadSetting(directory, kDisplaySection, L"mode", nullptr, L"Windowed").c_str(), L"Borderless") == 0;
 }
 
 bool ReadSkipIntro(const std::wstring& directory) {
-    wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"Startup", L"skip_intro", L"0", value, 8, (directory + kLauncherIni).c_str());
-    return wcscmp(value, L"1") == 0;
+    return ReadSetting(directory, kStartupSection, L"skip_intro", nullptr, L"0") == L"1";
 }
 
 bool ReadSkipDialogue(const std::wstring& directory) {
-    wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"QualityOfLife", L"SkipDialogue", L"0", value, 8, (directory + kLauncherIni).c_str());
-    return wcscmp(value, L"1") == 0;
-}
-
-bool ReadLadderGrabWithUp(const std::wstring& directory) {
-    wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"QualityOfLife", L"LadderGrabWithUp", L"0", value, 8, (directory + kLauncherIni).c_str());
-    return wcscmp(value, L"1") == 0;
+    return ReadSetting(directory, kQualitySection, L"skip_dialogue", L"SkipDialogue", L"0") == L"1";
 }
 
 bool ReadRevealFullMap(const std::wstring& directory) {
-    wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"QualityOfLife", L"RevealFullMap", L"0", value, 8, (directory + kLauncherIni).c_str());
-    return wcscmp(value, L"1") == 0;
+    return ReadSetting(directory, kQualitySection, L"reveal_full_map", L"RevealFullMap", L"0") == L"1";
 }
 
 int ReadFrameRate(const std::wstring& directory) {
-    wchar_t value[16] = {};
-    GetPrivateProfileStringW(L"Display", L"frame_rate", L"60", value, 16, (directory + kLauncherIni).c_str());
-    if (wcscmp(value, L"120") == 0) return 1;
-    if (wcscmp(value, L"unlocked") == 0) return 2;
+    const std::wstring value = ReadSetting(directory, kDisplaySection, L"frame_rate", nullptr, L"60");
+    if (value == L"120") return 1;
+    if (value == L"unlocked") return 2;
     return 0;
 }
 
 bool ReadShowInGameFps(const std::wstring& directory) {
-    wchar_t value[8] = {};
-    GetPrivateProfileStringW(L"QualityOfLife", L"show_in_game_fps", L"0", value, 8, (directory + kLauncherIni).c_str());
-    return wcscmp(value, L"1") == 0;
+    return ReadSetting(directory, kQualitySection, L"show_in_game_fps", nullptr, L"0") == L"1";
+}
+
+// False when the file cannot be read or is UTF-16, which the launcher does not write.
+bool ReadIniText(const std::wstring& path, std::string& text) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || file == nullptr) return false;
+    char buffer[4096];
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) text.append(buffer, count);
+    fclose(file);
+    return text.rfind("\xFF\xFE", 0) != 0;
 }
 
 // The profile API adds a new section right below the last line. After Play has saved, every section header but the first is
 // preceded by exactly one blank line and trailing blank lines are dropped; other lines stay as they are. A UTF-16 file is left alone.
 void SeparateIniSections(const std::wstring& path) {
-    FILE* file = nullptr;
-    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || file == nullptr) return;
     std::string text, formatted;
-    char buffer[4096];
-    size_t count;
-    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) text.append(buffer, count);
-    fclose(file);
-    if (text.rfind("\xFF\xFE", 0) == 0) return;
+    if (!ReadIniText(path, text)) return;
     size_t blanks = 0;
     for (size_t start = 0; start < text.size();) {
         const size_t end = min(text.find('\n', start), text.size());
@@ -138,10 +147,150 @@ void SeparateIniSections(const std::wstring& path) {
     }
     if (formatted == text) return;
     const std::wstring temporary = path + L".tmp";
+    FILE* file = nullptr;
     if (_wfopen_s(&file, temporary.c_str(), L"wb") != 0 || file == nullptr) return;
     const bool written = fwrite(formatted.data(), 1, formatted.size(), file) == formatted.size();
     if (fclose(file) != 0 || !written || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         DeleteFileW(temporary.c_str());
+}
+
+using IniPairs = std::vector<std::pair<std::wstring, std::wstring>>;
+
+IniPairs SectionPairs(const std::wstring& path, const wchar_t* section) {
+    std::vector<wchar_t> buffer(32768);
+    const DWORD length = GetPrivateProfileSectionW(section, buffer.data(), static_cast<DWORD>(buffer.size()), path.c_str());
+    IniPairs pairs;
+    for (const wchar_t* entry = buffer.data(); entry < buffer.data() + length && *entry != L'\0'; entry += wcslen(entry) + 1) {
+        const std::wstring text = entry;
+        const size_t equals = text.find(L'=');
+        if (equals != std::wstring::npos) pairs.emplace_back(text.substr(0, equals), text.substr(equals + 1));
+    }
+    return pairs;
+}
+
+std::wstring CanonicalKey(const std::wstring& key) {
+    for (const IniKeyAlias& alias : kIniKeyAliases) {
+        if (_wcsicmp(key.c_str(), alias.legacy) == 0) return alias.name;
+    }
+    return key;
+}
+
+bool WriteIniValue(const std::wstring& path, const wchar_t* section, const wchar_t* key, const wchar_t* value) {
+    return WritePrivateProfileStringW(section, key, value, path.c_str()) != FALSE;
+}
+
+bool IsObsoleteSetting(const wchar_t* section, const std::wstring& key) {
+    for (const IniKey& setting : kObsoleteSettings) {
+        if (_wcsicmp(section, setting.section) == 0 && _wcsicmp(key.c_str(), setting.key) == 0) return true;
+    }
+    return false;
+}
+
+// The section's keys move under the canonical name and the historical section is removed. Where spellings of one key meet, the value
+// ReadSetting returns is kept, so Play does not change a setting.
+bool MoveToCanonical(const std::wstring& path, const IniSection& section) {
+    struct Entry { std::wstring key, value; int rank; };
+    std::vector<Entry> merged;
+    for (const wchar_t* source : {section.name, section.legacyName}) {
+        for (const auto& [key, value] : SectionPairs(path, source)) {
+            if (IsObsoleteSetting(source, key)) continue;
+            const std::wstring name = CanonicalKey(key);
+            const int rank = (name != key ? 2 : 0) + (source == section.legacyName ? 1 : 0);
+            const auto found = std::find_if(merged.begin(), merged.end(),
+                                            [&](const Entry& entry) { return _wcsicmp(entry.key.c_str(), name.c_str()) == 0; });
+            if (found == merged.end()) {
+                merged.push_back({name, value, rank});
+            } else if (rank < found->rank) {
+                found->value = value;
+                found->rank = rank;
+            }
+        }
+    }
+    // The profile API keeps the spelling of an existing header, so the section is deleted and written again under the canonical name.
+    bool ok = WriteIniValue(path, section.legacyName, nullptr, nullptr);
+    ok = WriteIniValue(path, section.name, nullptr, nullptr) && ok;
+    for (const Entry& entry : merged) ok = WriteIniValue(path, section.name, entry.key.c_str(), entry.value.c_str()) && ok;
+    return ok;
+}
+
+std::wstring Trim(const std::wstring& text) {
+    const size_t first = text.find_first_not_of(L" \t\r");
+    return first == std::wstring::npos ? std::wstring() : text.substr(first, text.find_last_not_of(L" \t\r") - first + 1);
+}
+
+// Renames the historical section and key names of launcher.ini. A file that has none of them is not written. Returns true if it was written.
+bool MigrateIniNames(const std::wstring& directory) {
+    const std::wstring path = directory + kLauncherIni;
+    std::string text;
+    if (!ReadIniText(path, text)) return false;
+    std::vector<IniSection> sections;
+    bool inKnownSection = false;
+    bool historical = false;
+    for (size_t start = 0; start <= text.size();) {
+        const size_t end = min(text.find('\n', start), text.size());
+        const std::wstring line = Trim(std::wstring(text.begin() + start, text.begin() + end));
+        start = end + 1;
+        if (line.size() >= 2 && line.front() == L'[' && line.back() == L']') {
+            const std::wstring name = line.substr(1, line.size() - 2);
+            inKnownSection = false;
+            for (const IniSection& known : kIniSections) {
+                if (_wcsicmp(name.c_str(), known.name) != 0 && _wcsicmp(name.c_str(), known.legacyName) != 0) continue;
+                inKnownSection = true;
+                historical = historical || name == known.legacyName;
+                const bool seen = std::any_of(sections.begin(), sections.end(),
+                                              [&](const IniSection& section) { return section.name == known.name; });
+                if (!seen) sections.push_back(known);
+            }
+        } else if (inKnownSection && line.find(L'=') != std::wstring::npos) {
+            const std::wstring key = Trim(line.substr(0, line.find(L'=')));
+            for (const IniKeyAlias& alias : kIniKeyAliases) historical = historical || key == alias.legacy;
+        }
+    }
+    if (!historical) return false;
+    bool ok = true;
+    for (const IniSection& section : sections) {
+        const bool moved = MoveToCanonical(path, section);
+        ok = moved && ok;
+    }
+    if (!ok) MessageBoxW(nullptr, L"The launcher.ini section names could not be updated to the new format.", kTitle, MB_OK | MB_ICONWARNING);
+    return true;
+}
+
+bool HasIniKey(const std::wstring& path, const wchar_t* section, const wchar_t* key) {
+    const wchar_t absent[] = L"\x01";
+    wchar_t value[64] = {};
+    GetPrivateProfileStringW(section, key, absent, value, 64, path.c_str());
+    return wcscmp(value, absent) != 0;
+}
+
+// Deletes the removed features' settings, and a section that this leaves empty. Other content stays. Returns true if the file was written.
+bool RemoveObsoleteSettings(const std::wstring& directory) {
+    const std::wstring path = directory + kLauncherIni;
+    bool written = false, ok = true;
+    for (const IniKey& setting : kObsoleteSettings) {
+        if (!HasIniKey(path, setting.section, setting.key)) continue;
+        written = true;
+        ok = WriteIniValue(path, setting.section, setting.key, nullptr) && ok;
+        if (SectionPairs(path, setting.section).empty()) ok = WriteIniValue(path, setting.section, nullptr, nullptr) && ok;
+    }
+    if (!ok) MessageBoxW(nullptr, L"The removed settings could not be deleted from launcher.ini.", kTitle, MB_OK | MB_ICONWARNING);
+    return written;
+}
+
+// The launcher's save step for launcher.ini: renames historical names, then deletes removed settings. Returns true if the file was written.
+bool MigrateIniFile(const std::wstring& directory) {
+    const bool renamed = MigrateIniNames(directory);
+    const bool removed = RemoveObsoleteSettings(directory);
+    return renamed || removed;
+}
+
+const wchar_t* DisplayModeValue(bool borderless) { return borderless ? L"borderless" : L"windowed"; }
+
+// A missing mode counts as Windowed, so only Borderless is written into a file without one. Any other spelling is replaced by the canonical form.
+bool NeedsDisplayModeWrite(const std::wstring& directory, bool borderless) {
+    std::wstring stored;
+    if (!FindSetting(directory, kDisplaySection, L"mode", nullptr, stored)) return borderless;
+    return stored != DisplayModeValue(borderless);
 }
 
 // The settings file is kSettingsHeader followed by JSON text with every character stored as four bytes.
@@ -758,9 +907,9 @@ struct Launcher {
     static constexpr int kWorkAreaMargin = 24;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
     // monitors cannot add up rounding errors. The Quality of Life section includes the two-line Skip dialogue hint.
-    static constexpr int kQualityTop = 310, kQualityRows = 5, kSkipDialogueHint = 50;
+    static constexpr int kQualityTop = 310, kQualityRows = 4, kSkipDialogueHint = 50;
     static constexpr int kQualityHeight = 70 + 32 * (kQualityRows - 1) + kSkipDialogueHint;
-    static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 96, kButtonsTop = kCheatsTop + kCheatsHeight + 16;
+    static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 66, kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 620, kHeight = kButtonsTop + 48;
     // Added to the width a checkbox reports for its label so rounding never clips the last character.
     static constexpr int kCheckboxPadding = 4;
@@ -772,7 +921,6 @@ struct Launcher {
     int frameRateChoice = 0;
     HWND skip = nullptr;
     HWND skipDialogueBox = nullptr;
-    HWND ladderGrabBox = nullptr;
     HWND revealFullMapBox = nullptr;
     HWND showInGameFpsBox = nullptr;
     HFONT font = nullptr, heading = nullptr;
@@ -781,12 +929,9 @@ struct Launcher {
     bool borderless = false;
     bool skipIntro = false;
     bool skipDialogue = false;
-    bool ladderGrabWithUp = false;
     bool revealFullMap = false;
     bool showInGameFps = false;
-    bool cheatsEnabled = false;
     bool play = false;
-    HWND cheatsBox = nullptr;
     template <typename Function> static Function User32(const char* name) {
         return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
     }
@@ -893,11 +1038,9 @@ struct Launcher {
             self->frameRateChoice = static_cast<int>(SendMessageW(self->frameRate, CB_GETCURSEL, 0, 0));
             self->skipIntro = SendMessageW(self->skip, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->skipDialogue = SendMessageW(self->skipDialogueBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            self->ladderGrabWithUp = SendMessageW(self->ladderGrabBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->revealFullMap = SendMessageW(self->revealFullMapBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->showInGameFps = SendMessageW(self->showInGameFpsBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
-            self->cheatsEnabled = SendMessageW(self->cheatsBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             DestroyWindow(hwnd);
             return 0;
         }
@@ -914,10 +1057,8 @@ struct Launcher {
         skipIntro = ReadSkipIntro(directory);
         frameRateChoice = ReadFrameRate(directory);
         skipDialogue = ReadSkipDialogue(directory);
-        ladderGrabWithUp = ReadLadderGrabWithUp(directory);
         revealFullMap = ReadRevealFullMap(directory);
         showInGameFps = ReadShowInGameFps(directory);
-        cheatsEnabled = ReadCheatsEnabled(directory);
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
         // scaling the window as a bitmap, as before.
@@ -974,17 +1115,15 @@ struct Launcher {
         control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 214, 352, 24, 0, font);
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 246, 352, 48, 0, font);
         control(L"BUTTON", L"Quality of Life", BS_GROUPBOX, 24, kQualityTop, kWidth - 48, kQualityHeight, 0, font);
-        showInGameFpsBox = checkBox(L"Show in-game FPS", 44, kQualityTop + 30, kWidth - 88, 113);
+        showInGameFpsBox = checkBox(L"Show in-game FPS (F9)", 44, kQualityTop + 30, kWidth - 88, 113);
         skip = checkBox(L"Skip intro", 44, kQualityTop + 30 + 32, kWidth - 88, 102);
         skipDialogueBox = checkBox(L"Skip dialogue", 44, kQualityTop + 30 + 32 * 2, kWidth - 88, 111);
         // The line break keeps both lines inside the indented box at every scale.
         control(L"STATIC", L"Press A (Xbox), Cross (PlayStation),\nEnter or Space to skip the current line.", 0, 64, kQualityTop + 30 + 32 * 2 + 28 + 2,
                 kWidth - 108, 48, 0, font);
-        ladderGrabBox = checkBox(L"Grab ladders with Up", 44, kQualityTop + 30 + 32 * 3 + kSkipDialogueHint, kWidth - 88, 114);
-        revealFullMapBox = checkBox(L"Reveal full Map", 44, kQualityTop + 30 + 32 * 4 + kSkipDialogueHint, kWidth - 88, 115);
+        revealFullMapBox = checkBox(L"Reveal full Map", 44, kQualityTop + 30 + 32 * 3 + kSkipDialogueHint, kWidth - 88, 115);
         control(L"BUTTON", L"Cheats", BS_GROUPBOX, 24, kCheatsTop, kWidth - 48, kCheatsHeight, 0, font);
-        cheatsBox = checkBox(L"Enable cheats", 44, kCheatsTop + 30, kWidth - 88, 116);
-        control(L"STATIC", L"Press F10 in game to open the cheat menu", 0, 64, kCheatsTop + 30 + 28 + 2, kWidth - 108, 24, 0, font);
+        control(L"STATIC", L"Press F10 in game to open the cheat menu", 0, 44, kCheatsTop + 30, kWidth - 88, 24, 0, font);
         HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, kWidth / 2 - 5 - 92, kButtonsTop, 92, 30, IDOK, font);
         control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, kWidth / 2 + 5, kButtonsTop, 92, 30, IDCANCEL, font);
 
@@ -997,10 +1136,8 @@ struct Launcher {
         SendMessageW(frameRate, CB_SETCURSEL, frameRateChoice, 0);
         SendMessageW(skip, BM_SETCHECK, skipIntro ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(skipDialogueBox, BM_SETCHECK, skipDialogue ? BST_CHECKED : BST_UNCHECKED, 0);
-        SendMessageW(ladderGrabBox, BM_SETCHECK, ladderGrabWithUp ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(revealFullMapBox, BM_SETCHECK, revealFullMap ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(showInGameFpsBox, BM_SETCHECK, showInGameFps ? BST_CHECKED : BST_UNCHECKED, 0);
-        SendMessageW(cheatsBox, BM_SETCHECK, cheatsEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
 
         const int fromFile = ReadResolutionFile(directory);
         const int current = fromFile >= 0 ? fromFile : ReadIntSetting(directory, kResolutionKey);
@@ -1036,41 +1173,32 @@ struct Launcher {
                 MoveFileExW((directory + L"\\resolution.txt").c_str(), (directory + L"\\resolution.txt.old").c_str(), MOVEFILE_REPLACE_EXISTING);
             }
         }
-        // A new section is appended where it is first written, so the writes follow the window: Display, Startup, QualityOfLife, Cheats.
+        // A new section is appended where it is first written, so the writes follow the window: display, startup, quality_of_life.
         bool iniChanged = false;
         const auto saveIni = [&](const wchar_t* section, const wchar_t* key, const wchar_t* value) {
             if (!WritePrivateProfileStringW(section, key, value, (directory + kLauncherIni).c_str())) return false;
             iniChanged = true;
             return true;
         };
-        if (play && borderless != ReadBorderless(directory) && !saveIni(L"Display", L"mode", borderless ? L"Borderless" : L"Windowed")) {
+        if (play && NeedsDisplayModeWrite(directory, borderless) && !saveIni(kDisplaySection.name, L"mode", DisplayModeValue(borderless))) {
             MessageBoxW(nullptr, L"The display mode could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
-        if (play && skipIntro != ReadSkipIntro(directory) && !saveIni(L"Startup", L"skip_intro", skipIntro ? L"1" : L"0")) {
+        if (play && skipIntro != ReadSkipIntro(directory) && !saveIni(kStartupSection.name, L"skip_intro", skipIntro ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Skip intro setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
-        if (play && skipDialogue != ReadSkipDialogue(directory) && !saveIni(L"QualityOfLife", L"SkipDialogue", skipDialogue ? L"1" : L"0")) {
+        if (play && skipDialogue != ReadSkipDialogue(directory) && !saveIni(kQualitySection.name, L"skip_dialogue", skipDialogue ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Skip dialogue setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
-        if (play && ladderGrabWithUp != ReadLadderGrabWithUp(directory) &&
-            !saveIni(L"QualityOfLife", L"LadderGrabWithUp", ladderGrabWithUp ? L"1" : L"0")) {
-            MessageBoxW(nullptr, L"The Grab ladders with Up setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
-        }
-        if (play && revealFullMap != ReadRevealFullMap(directory) && !saveIni(L"QualityOfLife", L"RevealFullMap", revealFullMap ? L"1" : L"0")) {
+        if (play && revealFullMap != ReadRevealFullMap(directory) && !saveIni(kQualitySection.name, L"reveal_full_map", revealFullMap ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Reveal full Map setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
-        if (play && frameRateChoice != ReadFrameRate(directory) && !saveIni(L"Display", L"frame_rate", frameRateChoice == 1 ? L"120" : frameRateChoice == 2 ? L"unlocked" : L"60")) {
+        if (play && frameRateChoice != ReadFrameRate(directory) && !saveIni(kDisplaySection.name, L"frame_rate", frameRateChoice == 1 ? L"120" : frameRateChoice == 2 ? L"unlocked" : L"60")) {
             MessageBoxW(nullptr, L"The Frame rate setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
-        if (play && showInGameFps != ReadShowInGameFps(directory) && !saveIni(L"QualityOfLife", L"show_in_game_fps", showInGameFps ? L"1" : L"0")) {
+        if (play && showInGameFps != ReadShowInGameFps(directory) && !saveIni(kQualitySection.name, L"show_in_game_fps", showInGameFps ? L"1" : L"0")) {
             MessageBoxW(nullptr, L"The Show in-game FPS setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
-        if (play) {
-            if (cheatsEnabled != ReadCheatsEnabled(directory) && !saveIni(L"Cheats", L"enable_cheats", cheatsEnabled ? L"1" : L"0")) {
-                MessageBoxW(nullptr, L"The Enable cheats setting could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
-            }
-            if (HasSetting(directory, L"enable_cheat_menu")) saveIni(L"Cheats", L"enable_cheat_menu", nullptr);
-        }
+        if (play && MigrateIniFile(directory)) iniChanged = true;
         if (iniChanged) SeparateIniSections(directory + kLauncherIni);
         return play;
     }
@@ -1150,22 +1278,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     bool borderless = false;
     bool skipIntro = false;
     bool skipDialogue = false;
-    bool ladderGrabWithUp = false;
     bool revealFullMap = false;
     bool showInGameFps = false;
     int frameRateChoice = 0;
-    bool cheatsEnabled = false;
     {
         Launcher launcher;
         if (!launcher.Run(directory, gameIcon)) return 0;
         borderless = launcher.borderless;
         skipIntro = launcher.skipIntro;
         skipDialogue = launcher.skipDialogue;
-        ladderGrabWithUp = launcher.ladderGrabWithUp;
         revealFullMap = launcher.revealFullMap;
         showInGameFps = launcher.showInGameFps;
         frameRateChoice = launcher.frameRateChoice;
-        cheatsEnabled = launcher.cheatsEnabled;
     }
 
     const std::wstring runtime = directory + L"\\" + kRuntime;
@@ -1244,13 +1368,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // The runtime reads these choices from its environment; an option that is off has no variable, so an inherited value cannot turn it on.
     SetEnvironmentVariableW(L"SOS_SKIP_INTRO", skipIntro ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_SKIP_DIALOGUE", skipDialogue ? L"1" : nullptr);
-    SetEnvironmentVariableW(L"SOS_LADDER_GRAB_WITH_UP", ladderGrabWithUp ? L"1" : nullptr);
     SetEnvironmentVariableW(L"SOS_REVEAL_FULL_MAP", revealFullMap ? L"1" : nullptr);
     SetEnvironmentVariableW(L"APS5_VBLANK_HZ", frameRateChoice >= 1 ? L"1000" : nullptr);
     SetEnvironmentVariableW(L"APS5_FPS_CAP", frameRateChoice == 1 ? L"120" : nullptr);
     SetEnvironmentVariableW(L"SOS_SHOW_IN_GAME_FPS", showInGameFps ? L"1" : nullptr);
-    SetEnvironmentVariableW(L"SOS_CHEATS_ENABLED", cheatsEnabled ? L"1" : nullptr);
-    for (const wchar_t* variable : kLegacyCheatVariables) SetEnvironmentVariableW(variable, nullptr);
     PROCESS_INFORMATION process{};
     std::wstring command = L"\"" + runtime + L"\"";
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup, &process)) {

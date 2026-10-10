@@ -2,7 +2,6 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_vulkan.h"
-#include "prx/common/CheatsEnabled.hpp"
 #include "prx/libkernel/HostExtension/include/HostExtension.hpp"
 #include <algorithm>
 #include <cfloat>
@@ -12,20 +11,17 @@
 
 namespace {
 
-bool ShowInGameFps() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("SOS_SHOW_IN_GAME_FPS");
-        return value != nullptr && std::strcmp(value, "1") == 0;
-    }();
-    return enabled;
+bool ShowInGameFpsAtLaunch() {
+    const char* value = std::getenv("SOS_SHOW_IN_GAME_FPS");
+    return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
 constexpr float kFontPixels = 18.0f;
 constexpr float kReferenceHeight = 1080.0f;
 constexpr float kMenuScale = 1.5f;
 constexpr float kMenuWidthEm = 21.75f;
-constexpr float kStatusWidthEm = 3.5f;
-constexpr float kComboWidthEm = 5.0f;
+constexpr float kValueWidthEm = 5.0f;
+constexpr float kDimArrowAlpha = 0.35f;
 constexpr float kMarginFontRatio = 0.5f;
 constexpr float kSmallFontRatio = 0.75f;
 constexpr const char* kMenuTitle = "In-Game - F10 Close";
@@ -92,73 +88,127 @@ void Separator() {
     ImGui::Separator();
 }
 
-// A state word at the right end of the row: a button while it can be clicked, plain text once it cannot.
-bool StateMark(const char* text, const ImVec4& color, float width, bool clickable) {
-    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - width);
-    ImGui::PushStyleColor(ImGuiCol_Text, color);
-    bool clicked = false;
-    if (clickable) {
-        clicked = ImGui::Button(text, ImVec2(width, 0.0f));
-    } else {
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (width - ImGui::CalcTextSize(text).x) * 0.5f);
-        ImGui::TextUnformatted(text);
-    }
-    ImGui::PopStyleColor();
-    return clicked;
+ImU32 Color(ImVec4 color, float alpha = 1.0f) {
+    color.w *= alpha;
+    return ImGui::GetColorU32(color);
 }
 
-bool Checkbox(const char* label, bool* value, bool enabled, HostControlState state) {
-    if (state == HostControlState::Normal) {
-        ImGui::BeginDisabled(!enabled);
-        const bool changed = ImGui::Checkbox(label, value);
-        ImGui::EndDisabled();
-        return changed;
+ImU32 Color(ImGuiCol color, float alpha = 1.0f) { return Color(ImGui::GetStyleColorVec4(color), alpha); }
+
+struct Row {
+    ImVec2 min, max;
+    ImVec2 boxMin, boxMax;
+    bool pressed;
+};
+
+// The whole row is one item, so a press reaches exactly one control.
+Row MenuRow(const char* label, bool interactive, ImGuiButtonFlags buttons) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const ImVec2 size(ImGui::GetContentRegionAvail().x, ImGui::GetFrameHeight() + style.ItemSpacing.y);
+    Row row{};
+    // The row owns the spacing below it, so neighbouring rows touch and no strip between them ignores a click.
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, 0.0f));
+    if (interactive) row.pressed = ImGui::InvisibleButton(label, size, buttons | ImGuiButtonFlags_EnableNav);
+    else ImGui::Dummy(size);
+    ImGui::PopStyleVar();
+    row.min = ImGui::GetItemRectMin();
+    row.max = ImGui::GetItemRectMax();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (interactive && ImGui::IsItemHovered()) {
+        draw->AddRectFilled(row.min, row.max, Color(ImGui::IsItemActive() ? ImGuiCol_HeaderActive : ImGuiCol_HeaderHovered), style.FrameRounding);
     }
-    // No box, so the row cannot read as on or off; the label keeps the place it has next to one.
+    const float middle = (row.min.y + row.max.y) * 0.5f;
+    draw->AddText(ImVec2(row.min.x + style.FramePadding.x, middle - ImGui::GetFontSize() * 0.5f), Color(ImGuiCol_Text), label);
+    const float halfBox = ImGui::GetFrameHeight() * 0.5f;
+    row.boxMin = ImVec2(row.max.x - ImGui::GetFontSize() * kValueWidthEm, middle - halfBox);
+    row.boxMax = ImVec2(row.max.x, middle + halfBox);
+    return row;
+}
+
+void DrawValue(const Row& row, const char* text, bool on, const ImVec4& offColor) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(row.boxMin, row.boxMax, Color(on ? ImGuiCol_CheckMark : ImGuiCol_FrameBg), ImGui::GetStyle().FrameRounding);
+    const ImVec2 size = ImGui::CalcTextSize(text);
+    const ImVec2 at((row.boxMin.x + row.boxMax.x - size.x) * 0.5f, (row.boxMin.y + row.boxMax.y - size.y) * 0.5f);
+    draw->AddText(at, on ? Color(ImGuiCol_WindowBg) : Color(offColor), text);
+}
+
+void DrawArrow(const Row& row, float left, const char* arrow, bool usable, bool on) {
+    const float width = ImGui::GetFrameHeight();
+    const ImVec2 size = ImGui::CalcTextSize(arrow);
+    const ImVec2 at(left + (width - size.x) * 0.5f, (row.boxMin.y + row.boxMax.y - size.y) * 0.5f);
+    ImGui::GetWindowDrawList()->AddText(at, Color(on ? ImGuiCol_WindowBg : ImGuiCol_Text, usable ? 1.0f : kDimArrowAlpha), arrow);
+}
+
+void DrawSpecialState(const Row& row, HostControlState state) {
     const bool failed = state == HostControlState::Failed;
-    const char* const text = failed ? kFailedText : kPendingText;
-    ImGui::PushID(label);
-    ImGui::AlignTextToFramePadding();
-    ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-    ImGui::TextUnformatted(label);
-    const float width = ImGui::CalcTextSize(text).x + 2.0f * ImGui::GetStyle().FramePadding.x;
-    const bool clicked = StateMark(text, failed ? kFailedColor : kPendingColor, width, enabled);
-    ImGui::PopID();
-    return clicked;
+    DrawValue(row, failed ? kFailedText : kPendingText, false, failed ? kFailedColor : kPendingColor);
 }
 
-bool Combo(const char* label, int* index, const char* const* items, int count, bool enabled, bool failed) {
-    const float width = ImGui::GetFontSize() * kComboWidthEm;
-    ImGui::PushID(label);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
-    ImGui::AlignTextToFramePadding();
-    bool changed = false;
-    if (failed) {
-        ImGui::TextUnformatted(label);
-        changed = StateMark(kFailedText, kFailedColor, width, enabled);
-    } else {
-        ImGui::BeginDisabled(!enabled);
-        ImGui::TextUnformatted(label);
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - width);
-        ImGui::SetNextItemWidth(width);
-        changed = ImGui::Combo("##value", index, items, count);
-        ImGui::EndDisabled();
+// A click on PENDING or FAILED reports a press without a new value. A disabled control is dimmed unless it shows one of those words.
+bool Toggle(const char* label, bool* value, bool enabled, HostControlState state) {
+    const bool normal = state == HostControlState::Normal;
+    ImGui::BeginDisabled(normal && !enabled);
+    const Row row = MenuRow(label, enabled, ImGuiButtonFlags_MouseButtonLeft);
+    if (normal) DrawValue(row, *value ? "ON" : "OFF", *value, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    else DrawSpecialState(row, state);
+    ImGui::EndDisabled();
+    if (row.pressed && normal) *value = !*value;
+    return row.pressed;
+}
+
+int ChoiceStep(const Row& row, bool focused, bool& wrap) {
+    wrap = false;
+    if (focused && ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false)) return -1;
+    if (focused && ImGui::IsKeyPressed(ImGuiKey_RightArrow, false)) return 1;
+    if (!row.pressed) return 0;
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        const float x = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left].x;
+        const float arrowWidth = ImGui::GetFrameHeight();
+        if (x >= row.boxMin.x && x < row.boxMin.x + arrowWidth) return -1;
+        if (x >= row.boxMax.x - arrowWidth) return 1;
     }
-    ImGui::PopID();
-    return changed;
+    wrap = true;
+    return ImGui::IsMouseReleased(ImGuiMouseButton_Right) ? -1 : 1;
 }
 
-bool StatusButton(const char* label, const char* status, bool enabled, bool failed) {
-    const float statusWidth = ImGui::GetFontSize() * kStatusWidthEm;
+// The < and > ends of the value and the Left and Right keys step once and stop at the first and last value; anywhere else on the row, a
+// left click, Enter or Space goes forward and a right click goes back, wrapping around.
+bool Choice(const char* label, int* index, const char* const* items, int count, bool enabled, bool failed) {
+    ImGui::BeginDisabled(!failed && !enabled);
+    const ImGuiButtonFlags buttons = failed ? ImGuiButtonFlags_MouseButtonLeft : ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight;
+    const Row row = MenuRow(label, enabled, buttons);
+    const bool focused = enabled && ImGui::IsItemFocused();
+    const int current = *index;
+    if (failed) {
+        DrawSpecialState(row, HostControlState::Failed);
+    } else {
+        const bool on = current != 0;
+        DrawValue(row, items[current], on, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        DrawArrow(row, row.boxMin.x, "<", current > 0, on);
+        DrawArrow(row, row.boxMax.x - ImGui::GetFrameHeight(), ">", current < count - 1, on);
+    }
+    ImGui::EndDisabled();
+    if (failed) return row.pressed;
+    bool wrap = false;
+    const int step = ChoiceStep(row, focused, wrap);
+    const int next = wrap ? (current + step + count) % count : std::clamp(current + step, 0, count - 1);
+    if (next == current) return false;
+    *index = next;
+    return true;
+}
+
+bool Action(const char* label, const char* status, bool enabled, bool failed) {
+    const float statusWidth = ImGui::GetFontSize() * kValueWidthEm;
     const float buttonWidth = ImGui::GetContentRegionAvail().x - statusWidth - ImGui::GetStyle().ItemSpacing.x;
     ImGui::BeginDisabled(!enabled);
     const bool clicked = ImGui::Button(label, ImVec2(buttonWidth, 0.0f));
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (failed) ImGui::PushStyleColor(ImGuiCol_Text, kFailedColor);
-    ImGui::TextUnformatted(failed ? kFailedText : status);
-    if (failed) ImGui::PopStyleColor();
+    const char* const text = failed ? kFailedText : status;
+    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - (statusWidth + ImGui::CalcTextSize(text).x) * 0.5f);
+    ImGui::PushStyleColor(ImGuiCol_Text, failed ? kFailedColor : ImGui::GetStyleColorVec4(ImGuiCol_Text));
+    ImGui::TextUnformatted(text);
+    ImGui::PopStyleColor();
     return clicked;
 }
 
@@ -175,7 +225,7 @@ void DrawFramesPerSecond(double fps) {
     ImGui::PopFont();
 }
 
-const HostMenuWidgets kWidgets{Heading, Separator, Checkbox, Combo, StatusButton};
+const HostMenuWidgets kWidgets{Heading, Separator, Toggle, Choice, Action};
 
 void CheckVkResult(VkResult result) {
     if (result != VK_SUCCESS) std::fprintf(stderr, "In-game overlay: Vulkan call returned %d\n", static_cast<int>(result));
@@ -189,16 +239,23 @@ bool Succeeded(VkResult result, const char* what) {
 
 }
 
+ImGuiOverlay::ImGuiOverlay() : showFps(ShowInGameFpsAtLaunch()) {}
+
 void ImGuiOverlay::Bind(SDL_Window* target) {
     window = target;
 }
 
 bool ImGuiOverlay::ToggleKeyPressed(const SDL_Event& event) {
-    if (!CheatsEnabled()) return false;
-    if (event.type != SDL_KEYDOWN || event.key.repeat != 0 || event.key.keysym.scancode != SDL_SCANCODE_F10) return false;
+    if (event.type != SDL_KEYDOWN || event.key.repeat != 0) return false;
+    const SDL_Scancode key = event.key.keysym.scancode;
+    if (key != SDL_SCANCODE_F9 && key != SDL_SCANCODE_F10) return false;
     if (window == nullptr || event.key.windowID != SDL_GetWindowID(window)) return false;
-    open = !open;
-    if (!open && state == State::Ready) ReleaseImGuiInput();
+    if (key == SDL_SCANCODE_F9) {
+        showFps = !showFps;
+    } else {
+        open = !open;
+        if (!open && state == State::Ready) ReleaseImGuiInput();
+    }
     return true;
 }
 
@@ -207,7 +264,7 @@ void ImGuiOverlay::ProcessEvent(const SDL_Event& event) {
 }
 
 bool ImGuiOverlay::Wanted(const AgcDriver::PresentationOverlayFrame& frame) {
-    if (!CheatsEnabled() && !ShowInGameFps()) return false;
+    if (!open && !showFps) return false;
     if (state == State::Unready) {
         const bool started = window != nullptr && start(frame);
         if (!started) {
@@ -218,7 +275,7 @@ bool ImGuiOverlay::Wanted(const AgcDriver::PresentationOverlayFrame& frame) {
             state = State::Ready;
         }
     }
-    return state == State::Ready && frame.device == device && (open || ShowInGameFps());
+    return state == State::Ready && frame.device == device;
 }
 
 void ImGuiOverlay::Record(const AgcDriver::PresentationOverlayFrame& frame) {
@@ -226,7 +283,7 @@ void ImGuiOverlay::Record(const AgcDriver::PresentationOverlayFrame& frame) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     if (open) drawMenu();
-    if (ShowInGameFps()) DrawFramesPerSecond(framesPerSecond);
+    if (showFps) DrawFramesPerSecond(framesPerSecond);
     ImGui::Render();
     const Target* target = targetFor(frame);
     if (target == nullptr) return;
