@@ -473,6 +473,35 @@ int APS5_VABI _ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE(void*
     return 0;
 }
 
+// The second-generation parameter block, used by newer titles (this one's PSN module among them).
+// Its layout is not public, so these deliberately do not write through `self`: the object is
+// allocated by the caller, and storing at a guessed offset would corrupt the caller's stack instead
+// of failing. The library keeps its own allocator and limits, so ignoring the requested values is
+// safe here, and `initialize` reports success the way the first-generation entry point does.
+int APS5_VABI _ZN3sce4Json14InitParameter2C1Ev(void* self) {
+    (void)self;
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json14InitParameter217setFileBufferSizeEm(void* self, std::uint64_t bytes) {
+    (void)self;
+    (void)bytes;
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv(void* self, void* allocator, void* context) {
+    (void)self;
+    (void)allocator;
+    (void)context;
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E(void* self, const void* parameter) {
+    (void)self;
+    (void)parameter;
+    return 0;
+}
+
 int APS5_VABI _ZN3sce4Json11Initializer9terminateEv(void* self) {
     (void)self;
     auto& state = State();

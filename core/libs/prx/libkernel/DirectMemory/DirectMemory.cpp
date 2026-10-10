@@ -52,7 +52,7 @@ struct KernelArena {
         return arena;
     }
     bool Contains(const void* pointer, size_t len) const { return GuestArena::GuestArenaContains_nid_postfix(pointer, len); }
-    void* Allocate(size_t len, size_t alignment) { return GuestArena::GuestArenaAllocate_nid_postfix(len, alignment); }
+    void* Allocate(size_t len, size_t alignment) { return GuestArena::GuestArenaAllocate_nid_postfix(len, alignment, __builtin_return_address(0)); }
     void MarkUsed(const void* pointer, size_t len) { GuestArena::GuestArenaMarkUsed_nid_postfix(pointer, len); }
     void Release(const void* pointer, size_t len) { GuestArena::GuestArenaRelease_nid_postfix(pointer, len); }
 };
@@ -382,6 +382,45 @@ void Unmap(void* addr, size_t len) {
 #endif
 }
 
+// PS5 titles map direct memory for the GPU and assume a low virtual window. The Windows back end
+// gets that from its guest arena (the first mapping lands at 0x200000000 and the rest follow it),
+// while a plain Linux mmap hands back a top-down address that this title's allocator rejects: it
+// re-requests the same 256 MB block and then asserts. Reserve the same low window here.
+#if !defined(_WIN32)
+constexpr std::uintptr_t LowArenaStart = 0x200000000;
+constexpr std::size_t LowArenaSize = 0x400000000;
+
+class LowArena {
+public:
+    void* TryMap(std::size_t len, int prot, std::size_t alignment) {
+        std::lock_guard lock(mutex);
+        if (!reserved) {
+            const void* probe = mmap(reinterpret_cast<void*>(LowArenaStart), LowArenaSize, PROT_NONE,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+            if (probe == MAP_FAILED) return nullptr;
+            reserved = true;
+        }
+        const std::size_t prefix = (alignment - (cursor & (alignment - 1))) & (alignment - 1);
+        if (cursor + prefix + len > LowArenaStart + LowArenaSize) return nullptr;
+        const void* mapped = mmap(reinterpret_cast<void*>(cursor + prefix), len, prot,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+        if (mapped == MAP_FAILED) return nullptr;
+        cursor += prefix + len;
+        return reinterpret_cast<void*>(cursor - len);
+    }
+
+private:
+    std::mutex mutex;
+    std::uintptr_t cursor = LowArenaStart;
+    bool reserved = false;
+};
+
+LowArena& GetLowArena() {
+    static LowArena arena;
+    return arena;
+}
+#endif
+
 void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
     ValidateLength(len);
     alignment = ValidateAlignment(alignment);
@@ -418,6 +457,9 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
 #ifdef _WIN32
     return mmap_aligned(len, prot, alignment);
 #endif
+#if !defined(_WIN32)
+    if (auto* low = GetLowArena().TryMap(len, prot, alignment)) return low;
+#endif
     if (len > std::numeric_limits<size_t>::max() - alignment) {
         throw std::overflow_error("Aligned mapping size overflow");
     }
@@ -431,10 +473,16 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
     const size_t prefix = (alignment - (raw & (alignment - 1))) & (alignment - 1);
     void* aligned = reinterpret_cast<void*>(raw + prefix);
     const size_t suffix = allocLen - prefix - len;
+    if (prefix != 0) {
+        GuestAllocations::GuestAllocationsInvalidate_nid_postfix(reinterpret_cast<std::uintptr_t>(result), prefix);
+    }
     if (prefix != 0 && munmap(result, prefix) != 0) {
         const int error = errno;
         Unmap(result, allocLen);
         throw std::system_error(error, std::generic_category(), "Mapping prefix munmap failed");
+    }
+    if (suffix != 0) {
+        GuestAllocations::GuestAllocationsInvalidate_nid_postfix(reinterpret_cast<std::uintptr_t>(raw + prefix + len), suffix);
     }
     if (suffix != 0 && munmap(reinterpret_cast<void*>(raw + prefix + len), suffix) != 0) {
         const int error = errno;
@@ -512,7 +560,7 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     }
     *addr = mapped;
     RecordProtection(mapped, len, prot);
-    Trace("map direct %p+0x%zx phys=0x%llx prot=0x%x flags=0x%x align=0x%zx", mapped, len, static_cast<unsigned long long>(physStart), prot, flags, alignment);
+    Trace("map direct %p+0x%zx phys=0x%llx prot=0x%x flags=0x%x align=0x%zx caller=%p", mapped, len, static_cast<unsigned long long>(physStart), prot, flags, alignment, __builtin_return_address(0));
     return 0;
 }
 
@@ -626,7 +674,7 @@ void CreateDirectMemoryBacking(int64_t start, size_t len, int memoryType) {
     std::map<std::uint64_t, PhysicalPage> pages;
     for (std::size_t offset = 0; offset < len; offset += PS5_PAGE_SIZE) pages.emplace(first + offset, PhysicalPage{backing, offset});
     g_physPages.merge(pages);
-    Trace("allocate physical 0x%llx+0x%zx", static_cast<unsigned long long>(first), len);
+    Trace("allocate physical 0x%llx+0x%zx type=%d caller=%p", static_cast<unsigned long long>(first), len, memoryType, __builtin_return_address(0));
 }
 
 void ForgetDirectMemory(int64_t start, size_t len) {

@@ -1,6 +1,6 @@
 # SonsOfSparta-PS5 Native
 
-**God of War: Sons of Sparta for PS5, running on Windows through AnyPS5.**
+**God of War: Sons of Sparta for PS5, running on Windows through AnyPS5. The compatibility layer also builds and runs on Linux - see [Linux](#linux).**
 
 Made possible by the [AnyPS5](https://github.com/boykopovar/AnyPS5) project. The source code is in this repository and the build is on the [Releases](../../releases) page.
 
@@ -68,6 +68,7 @@ If you created `resolution.txt` with an earlier version, its value is preselecte
 - **Tested with:** God of War: Sons of Sparta, title ID `PPSA28997`, version `01.008.001`. Other versions, regions, patches or repacked dumps have not been tested and may not work.
 - SmartScreen may warn (*More info* → *Run anyway*). Verify with the checksum.
 - Requires Windows 10/11 64-bit and a graphics card with a Vulkan 1.3 driver. About 25 GB of free space is needed for the game files you copy in.
+- The packaged download is Windows only. Linux is supported from source: the compatibility layer builds and the game runs at 60 FPS, but there is no Linux launcher yet. See [Linux](#linux).
 
 ## Building from source
 
@@ -84,6 +85,60 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1 -Version 0.4.1
 The first configure downloads prebuilt FFmpeg libraries from GitHub, so it needs internet access. The first build takes a while.
 
 The result is `release\SonsOfSparta-PS5-Native-0.4.1-win64`, the same layout as the download. Copy your own game files next to `SonsOfSparta-PS5.exe` as described above.
+
+## Linux
+
+The compatibility layer builds natively on Linux, and the game reaches its main menu and holds 60 FPS in
+gameplay. **There is no Linux launcher and no packaged Linux build yet**, so this is a source-only path for
+now. What the Windows launcher does for you on first start has no Linux equivalent in this repository:
+
+- converting `eboot.bin` to an ELF, and converting each bundled `sce_module` to the `.prx.guest.prx` form the
+  loader expects;
+- building a stub library for the PS5 imports the compatibility layer does not implement, so the relink can
+  resolve them;
+- seeding the settings file, then relinking with `--registry --skip-syscall-check`.
+
+Until those exist, running on Linux means doing that work yourself with your own tooling. The build itself is
+supported and is what the rest of this section covers.
+
+### Building
+
+You need GCC with C++20, CMake 3.20 or newer, Ninja and Git. `g++`, `cmake` and `ninja` must be on your
+`PATH`. Tested on Arch Linux with GCC 15.2, an NVIDIA card on driver 615.71.09, under a Wayland compositor.
+AMD and Intel are untested. A Vulkan 1.3 driver is required, as on Windows.
+
+```
+git clone --recursive https://github.com/OverkillLabs3/SoS-PS5.git
+cd SoS-PS5
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DANYPS5_BSYMBOLIC_PRX=ON
+cmake --build build --target libs relinker
+```
+
+`--recursive` matters: the tree uses submodules, including `3rdparty/imgui`.
+
+Keep `-DANYPS5_BSYMBOLIC_PRX=ON`. It makes each host library bind references to its own exports, the way a PE
+DLL does. Without it, a game that ships its own `libc.prx` interposes the host libc instead (upstream AnyPS5
+issue #476). The option defaults to off.
+
+This builds the host libraries into `build/core/libs/libs/` and the relinker into
+`build/core/relinker/relinker`. FFmpeg comes from the `3rdparty/ffmpeg-core` submodule, so the recursive clone
+is what fetches it.
+
+### Two settings worth knowing
+
+- **`APS5_GC_WAIT_MS`** sets how long a guest exception round waits for the target thread. It is read on both
+  platforms, and the default is 1000 ms. A game that parks threads pays that deadline on every round, so on
+  Linux start-up to the main menu measured 1,635 s at the default against 227.7 s at 100 ms, 106.4 s at 20 ms
+  and 86.3 s at 5 ms. Set it to `5`.
+- **`shader_cache`** is written next to the game while you play. Deleting it costs about ten minutes of shader
+  recompilation on the next run and the game looks hung at `FPS: 0.05` while that happens. Keep the folder.
+
+### Frame rate
+
+The engine reads **`APS5_FPS_CAP`** at the first flip: a number, accepted only between 30 and 1000, for example
+`APS5_FPS_CAP=120`. Unset, or outside that range, leaves the default pacing, which follows the display refresh -
+59.94 Hz on a 60 Hz mode. The value is read once, so set it before starting. On Windows the same variable can be
+given through `debug_env.txt` next to the launcher, whose `KEY=VALUE` lines are loaded into the environment.
 
 ## License
 

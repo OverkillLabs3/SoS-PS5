@@ -1,4 +1,12 @@
+#ifdef _WIN32
 extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId();
+#else
+#include <functional>
+#include <thread>
+inline unsigned long GetCurrentThreadId() {
+    return static_cast<unsigned long>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0x7fffffff);
+}
+#endif
 #include <cstdint>
 #include "prx/common/StderrLog.hpp"
 #include <cstddef>

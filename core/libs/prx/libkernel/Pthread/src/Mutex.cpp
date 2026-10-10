@@ -21,7 +21,9 @@ template <class TMutex>
 void lockInterruptibly(TMutex& native) {
     if (native.try_lock()) return;
     Pthread self = scePthreadSelf();
+#ifdef _WIN32
     if (!self->wakeEvent) self->wakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+#endif
     for (;;) {
         self->inWait.store(true);
         const bool locked = self->pendingException.load() == 0 && native.try_lock_for(std::chrono::milliseconds(2));
