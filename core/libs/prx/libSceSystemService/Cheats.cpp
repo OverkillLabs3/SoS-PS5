@@ -17,7 +17,6 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/HostExtension/include/HostExtension.hpp"
 #include "prx/libSceAvPlayer/include/SafeTransition.hpp"
-#include "prx/common/CheatsEnabled.hpp"
 
 namespace {
 
@@ -53,8 +52,8 @@ constexpr const char* kUpgradeMaterials[] = {"loot_common_shield", "loot_rare_sh
 constexpr std::size_t kMostItems = std::size(kUpgradeMaterials);
 static_assert(std::size(kBloodOrb) <= kMostItems);
 
-// The one wallet action F7 and F8 share. Only the window thread queues it or gives up a queued one; the game thread moves a queued action
-// to running and back to idle, and owns it while it runs.
+// The one wallet action both item buttons share. Only the window thread queues it or gives up a queued one; the game thread moves a queued
+// action to running and back to idle, and owns it while it runs.
 enum : int { kIdle, kBloodOrbsQueued, kBloodOrbsRunning, kUpgradeMaterialsQueued, kUpgradeMaterialsRunning };
 std::atomic<int> walletAction{kIdle};
 std::atomic<std::uint64_t> walletRequestedAt{0};
@@ -73,13 +72,10 @@ struct Award {
 Award bloodOrbs{"Blood Orbs", "+1000", kBloodOrb, std::size(kBloodOrb), 1000, true, kBloodOrbsQueued, kBloodOrbsRunning};
 Award upgradeMaterials{"Upgrade Materials", "+10", kUpgradeMaterials, std::size(kUpgradeMaterials), 10, false, kUpgradeMaterialsQueued,
                        kUpgradeMaterialsRunning};
-// Null while the keys work; written by whichever thread removes the wallet hook and read by the window thread.
+// Null while the item buttons work; written by whichever thread removes the wallet hook and read by the window thread.
 std::atomic<const char*> awardsUnavailable{"game code not recognised"};
 constexpr const char* kWalletStillPatched = "PlayerController.Update is still patched";
 
-// SDL scancodes
-constexpr int kGodModeKey = 58, kInfiniteSpiritKey = 59, kInfiniteMagicKey = 60, kDamageMultiplierKey = 61, kMovementSpeedKey = 62, kJumpHeightKey = 63,
-              kBloodOrbsKey = 64, kUpgradeMaterialsKey = 65, kGatePassKey = 66;
 constexpr std::uint64_t kNoticeMs = 2000;
 constexpr std::uint64_t kAwardWaitMs = 1000;
 
@@ -1115,7 +1111,7 @@ void TrackInstalled(Site& site) {
     }
 }
 
-// Only one thread may be between Stop and Resume: a key press and a finished wallet action can arrive together, and two threads stopping
+// Only one thread may be between Stop and Resume: a menu click and a finished wallet action can arrive together, and two threads stopping
 // each other would both stay stopped. It is taken before any thread is stopped, so a stopped thread never holds it.
 std::mutex transitions;
 
@@ -1319,8 +1315,8 @@ void RemoveWalletHook() {
     if (result == Result::Done) return;
     awardsUnavailable.store(kWalletStillPatched);
     std::fprintf(stderr, result == Result::Mismatch
-                             ? "Blood Orbs and Upgrade Materials: the game's own PlayerController.Update could not be restored, keys disabled\n"
-                             : "Blood Orbs and Upgrade Materials: the game was running PlayerController.Update, keys disabled\n");
+                             ? "Blood Orbs and Upgrade Materials: the game's own PlayerController.Update could not be restored, item buttons disabled\n"
+                             : "Blood Orbs and Upgrade Materials: the game was running PlayerController.Update, item buttons disabled\n");
 }
 
 const char* FactorText(int factor) { return factor == 2 ? "2x" : factor == 4 ? "4x" : factor == 6 ? "6x" : "OFF"; }
@@ -1396,38 +1392,14 @@ void SetFactor(Cheat& cheat, int next) {
     Announce(cheat, notice);
 }
 
-// Runs on the window thread, where game objects must not be touched: keys only install or remove patches and queue a wallet action.
-void OnKey(int scancode) {
-    if (!CheatsEnabled()) return;
-    if (scancode == kBloodOrbsKey || scancode == kUpgradeMaterialsKey) {
-        Request(scancode == kBloodOrbsKey ? bloodOrbs : upgradeMaterials);
-        return;
-    }
-    Cheat* cheat = scancode == kGodModeKey ? &godMode
-                 : scancode == kInfiniteSpiritKey ? &infiniteSpirit
-                 : scancode == kInfiniteMagicKey  ? &infiniteMagic
-                 : scancode == kDamageMultiplierKey ? &damageMultiplier
-                 : scancode == kMovementSpeedKey ? &movementSpeed
-                 : scancode == kJumpHeightKey    ? &jumpHeight
-                 : scancode == kGatePassKey      ? &gatePass
-                                                 : nullptr;
-    if (cheat == nullptr) return;
-    if (cheat->factor != nullptr) {
-        const int factor = cheat->factor->load();
-        SetFactor(*cheat, factor == 1 ? 2 : factor == 2 ? 4 : factor == 4 ? 6 : 1);
-    } else {
-        SetToggle(*cheat, !cheat->active.load());
-    }
-}
-
-// In the order of the menu's combo box.
+// In the menu's order.
 constexpr int kFactors[] = {1, 2, 4, 6};
 
 // A click on PENDING turns the cheat back on; a click on FAILED retries the restore.
 void DrawToggle(const HostMenuWidgets& ui, Cheat& cheat, const char* label) {
     bool on = cheat.active.load();
     const HostControlState state = cheat.failed ? HostControlState::Failed : cheat.pending ? HostControlState::Pending : HostControlState::Normal;
-    if (!ui.checkbox(label, &on, cheat.available, state)) return;
+    if (!ui.toggle(label, &on, cheat.available, state)) return;
     SetToggle(cheat, on || cheat.pending);
 }
 
@@ -1438,34 +1410,35 @@ void DrawMultiplier(const HostMenuWidgets& ui, Cheat& cheat, const char* label) 
         items[i] = FactorText(kFactors[i]);
         if (kFactors[i] == cheat.factor->load()) index = static_cast<int>(i);
     }
-    if (!ui.combo(label, &index, items, static_cast<int>(std::size(items)), cheat.available, cheat.failed)) return;
+    if (!ui.choice(label, &index, items, static_cast<int>(std::size(items)), cheat.available, cheat.failed)) return;
     SetFactor(cheat, kFactors[index]);
 }
 
 void DrawAward(const HostMenuWidgets& ui, Award& award, const char* label, bool available) {
     const char* notice = award.notice.load();
     const char* status = notice != nullptr && NowMs() < award.noticeUntil.load() ? notice : "";
-    if (!ui.statusButton(label, status, available, awardsUnavailable.load() == kWalletStillPatched)) return;
+    if (!ui.action(label, status, available, awardsUnavailable.load() == kWalletStillPatched)) return;
     Request(award);
 }
 
-// Drawn by the host overlay while the menu is open, on the window thread.
+// Drawn by the host overlay while the menu is open, on the window thread, where game objects must not be touched: controls only install or
+// remove patches and queue a wallet action.
 void DrawMenu(const HostMenuWidgets& ui) {
     ui.heading("PLAYER");
-    DrawToggle(ui, godMode, "God Mode (F1)");
-    DrawToggle(ui, infiniteSpirit, "Infinite Spartan Spirit (F2)");
-    DrawToggle(ui, infiniteMagic, "Infinite Magic (F3)");
-    DrawMultiplier(ui, damageMultiplier, "Damage Multiplier (F4)");
+    DrawToggle(ui, godMode, "God Mode");
+    DrawToggle(ui, infiniteSpirit, "Infinite Spartan Spirit");
+    DrawToggle(ui, infiniteMagic, "Infinite Magic");
+    DrawMultiplier(ui, damageMultiplier, "Damage Multiplier");
     ui.separator();
     ui.heading("MOVEMENT");
-    DrawToggle(ui, movementSpeed, "Movement Speed 2x (F5)");
-    DrawMultiplier(ui, jumpHeight, "Jump Height (F6)");
-    DrawToggle(ui, gatePass, "Pass Through Gates (F9)");
+    DrawToggle(ui, movementSpeed, "Movement Speed 2x");
+    DrawMultiplier(ui, jumpHeight, "Jump Height");
+    DrawToggle(ui, gatePass, "Pass Through Gates");
     ui.separator();
     ui.heading("ITEMS");
     const bool awardsAvailable = AwardsAvailable();
-    DrawAward(ui, bloodOrbs, "Add 1000 Blood Orbs (F7)", awardsAvailable);
-    DrawAward(ui, upgradeMaterials, "Add 10 Upgrade Materials (F8)", awardsAvailable);
+    DrawAward(ui, bloodOrbs, "Add 1000 Blood Orbs", awardsAvailable);
+    DrawAward(ui, upgradeMaterials, "Add 10 Upgrade Materials", awardsAvailable);
 }
 
 // Once per presented frame on the window thread: a queued wallet action that no player takes in time is given up and its hook removed,
@@ -1486,7 +1459,6 @@ bool ArmTrampolines() {
 }
 
 bool StartCheats() {
-    if (!CheatsEnabled()) return false;
     game = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(L"Il2cppUserAssemblies.prx.guest.prx"));
     if (game == nullptr) return false;
     const auto* headers = reinterpret_cast<const IMAGE_NT_HEADERS*>(game + reinterpret_cast<const IMAGE_DOS_HEADER*>(game)->e_lfanew);
@@ -1537,7 +1509,7 @@ bool StartCheats() {
     // bypass the player would run into it, and without the lock observer gate IDs would outlive a world transition.
     Bind(gatePass, gateReady && armed, &gateMoveSite, &blockedAheadSite, &physicsLockSite);
     SyncSafeTransition();
-    HostExtensionRegister_nid_no_patch(OnKey, OnFrame);
+    HostExtensionRegisterFrameTick_nid_no_patch(OnFrame);
     HostExtensionRegisterMenu_nid_no_patch(DrawMenu);
     return true;
 }

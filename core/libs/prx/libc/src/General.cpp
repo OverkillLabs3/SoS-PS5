@@ -21,11 +21,6 @@ struct PathAliases {
     std::vector<std::pair<std::string, std::string>> entries;
 };
 
-PathAliases& Aliases() {
-    static PathAliases aliases;
-    return aliases;
-}
-
 std::string TrimSlashes(const char* path) {
     std::string s(path);
     std::size_t start = 0;
@@ -37,6 +32,21 @@ std::string TrimSlashes(const char* path) {
         --end;
     }
     return s.substr(start, end - start);
+}
+
+// SOS_PATH_ALIAS is "<guest path>|<host path>": one game file the launcher serves from its own prepared copy.
+PathAliases& Aliases() {
+    static PathAliases aliases;
+    static std::once_flag loaded;
+    std::call_once(loaded, [] {
+        const char* value = std::getenv("SOS_PATH_ALIAS");
+        const std::string text = value != nullptr ? value : "";
+        const auto separator = text.find('|');
+        if (separator != std::string::npos && separator > 0 && separator + 1 < text.size()) {
+            aliases.entries.emplace_back(TrimSlashes(text.substr(0, separator).c_str()), text.substr(separator + 1));
+        }
+    });
+    return aliases;
 }
 
 std::optional<std::filesystem::path> ResolveAlias(const std::string& guestPath) {

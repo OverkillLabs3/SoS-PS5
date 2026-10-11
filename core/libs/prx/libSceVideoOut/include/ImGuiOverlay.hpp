@@ -8,7 +8,7 @@
 
 class ImGuiOverlay final : public AgcDriver::PresentationOverlay {
 public:
-    ImGuiOverlay() = default;
+    ImGuiOverlay();
     ImGuiOverlay(const ImGuiOverlay&) = delete;
     ImGuiOverlay& operator=(const ImGuiOverlay&) = delete;
 
@@ -53,6 +53,7 @@ private:
 
     SDL_Window* window = nullptr;
     bool open = false;
+    bool showFps;
     State state = State::Unready;
     bool contextCreated = false;
     bool sdlStarted = false;

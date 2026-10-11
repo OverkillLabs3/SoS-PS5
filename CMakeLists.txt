@@ -65,7 +65,7 @@ add_subdirectory(core/libs)
 add_subdirectory(core/relinker)
 
 if(WIN32)
-    add_executable(SonsOfSparta-PS5 WIN32 launcher/launcher.cpp launcher/launcher.rc)
+    add_executable(SonsOfSparta-PS5 WIN32 launcher/launcher.cpp launcher/XboxPromptAssets.cpp launcher/launcher.rc)
     target_compile_definitions(SonsOfSparta-PS5 PRIVATE UNICODE _UNICODE)
     target_link_options(SonsOfSparta-PS5 PRIVATE -municode -static)
     target_link_libraries(SonsOfSparta-PS5 PRIVATE gdiplus ole32 shell32 uuid gdi32 comctl32)
