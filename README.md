@@ -14,6 +14,8 @@ Made possible by the [AnyPS5](https://github.com/boykopovar/AnyPS5) project. The
 
 Nothing to install. The very first start prepares the game from your files: a small window explains it and it takes about two minutes. Later starts are fast. Your own files are never modified.
 
+**Show launcher at startup** (in the launcher's Launcher group) controls the settings window. Turn it off to start the game directly with your saved settings. The first-start and controller icon preparation windows still appear when they are needed, and errors are still shown. To show the settings window again, edit `launcher.ini` and set `show=1` in the `[launcher]` section.
+
 Closing the game window ends it within a few seconds. Logs are in the `logs` folder.
 
 ## Highlights
