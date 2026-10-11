@@ -9,6 +9,7 @@
 
 #ifdef _WIN32
 #include "prx/libScePad/include/PadControllerChannel.hpp"
+#include "prx/common/BlowInput.hpp"
 void SkipDialogueCrossPressed();  // SkipDialogueInput.cpp
 #endif
 
@@ -286,6 +287,8 @@ extern "C" void PadPublishInput_nid_postfix(const PadInputState& input) {
 #ifdef _WIN32
     constexpr std::uint32_t cross = 0x4000;  // Pad::PadButton::Cross
     if ((~state.buttons & input.buttons & cross) != 0) SkipDialogueCrossPressed();
+    constexpr std::uint32_t triangle = 0x1000;  // Pad::PadButton::Triangle
+    BlowInput::SetActive((input.buttons & triangle) != 0);
 #endif
     state = input;
     timestamp = sceKernelGetProcessTime();
@@ -297,6 +300,9 @@ extern "C" void PadPublishInput_nid_postfix(const PadInputState& input) {
 extern "C" void PadReportInputFailure_nid_postfix(std::exception_ptr error) {
     if (!error) throw std::invalid_argument("Pad: missing input failure");
     std::lock_guard lock(stateMutex);
+#ifdef _WIN32
+    BlowInput::SetActive(false);
+#endif
     if (!failure) failure = error;
 }
 

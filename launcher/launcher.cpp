@@ -435,7 +435,7 @@ std::wstring FinalPath(const std::wstring& path) {
 }
 
 std::wstring PreparedStamp(const std::wstring& directory, const std::wstring& source) {
-    return L"1 " + std::to_wstring(FileSize(source)) + L" " + std::to_wstring(FileSize(directory + L"\\tools\\relinker.exe"));
+    return L"2 " + std::to_wstring(FileSize(source)) + L" " + std::to_wstring(FileSize(directory + L"\\tools\\relinker.exe"));
 }
 
 std::wstring ReadStamp(const std::wstring& path) {
@@ -1391,8 +1391,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         DeleteFileW(registry.c_str());
         const std::wstring command = L"\"" + directory + L"\\tools\\relinker.exe\" --windows --registry --windows-diagnostics "
 
-        L"--skip-syscall-check --exclude-sce-module CommonDialog.prx --exclude-sce-module VoiceInputPlugin.prx --exclude-sce-module libSceNpCppWebApi.prx "
-        L"--defer-sce-module PSN.prx --defer-sce-module SaveData.prx --defer-sce-module lib_burst_generated.prx "
+        L"--skip-syscall-check --exclude-sce-module CommonDialog.prx --exclude-sce-module libSceNpCppWebApi.prx "
+        L"--defer-sce-module PSN.prx --defer-sce-module SaveData.prx --defer-sce-module VoiceInputPlugin.prx --defer-sce-module lib_burst_generated.prx "
         L"\"" + executable + L"\" \"" + runtime + L"\"";
         const long code = RunHidden(command, directory, directory + L"\\logs\\prepare.log");
         if (code != 0 || !Exists(runtime)) {
