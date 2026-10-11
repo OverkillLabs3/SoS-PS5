@@ -217,6 +217,19 @@ void* APS5_VABI sceKernelGetProcParam(void) {
     return const_cast<void*>(ApplicationProcessParameters_nid_no_patch());
 }
 
+// Operation mode the title branches on during early startup. A dumped executable has no kernel to
+// fill this, so the values are configurable: APS5_OPERATION_MODE / APS5_OPERATION_SUBMODE, default 0.
+int APS5_VABI sceKernelGetOperationMode(int* mode, int* submode) {
+    if (!mode || !submode) return sceInvalidArgument;
+    const auto configured = [] (const char* name) {
+        const auto* text = std::getenv(name);
+        return text ? std::atoi(text) : 0;
+    };
+    *mode = configured("APS5_OPERATION_MODE");
+    *submode = configured("APS5_OPERATION_SUBMODE");
+    return 0;
+}
+
 int APS5_VABI sceKernelUuidCreate(std::uint32_t* uuid) {
     if (!uuid) return sceInvalidArgument;
     static thread_local std::random_device device;

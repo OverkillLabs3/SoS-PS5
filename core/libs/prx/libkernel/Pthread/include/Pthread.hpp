@@ -6,6 +6,8 @@
 #include "prx/libkernel/Time/include/TimedWait.hpp"
 #include <atomic>
 #include <condition_variable>
+#include <pthread.h>
+#include <signal.h>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -74,17 +76,32 @@ struct PthreadAttrPrivate {
     int _solosched = 0;
 };
 
+// Guest exception delivery on Linux uses a host real-time signal; every guest thread must allow it
+// (a thread that blocks it would never receive the raise, and the title's stop-the-world would hang).
+#ifndef _WIN32
+inline int GuestExceptionSignal() { return SIGRTMIN + 1; }
+
+inline void AllowGuestExceptionSignal() {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, GuestExceptionSignal());
+    pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+}
+#endif
+
 struct PthreadPrivate {
 #ifdef _WIN32
     void* nativeHandle = nullptr;
 #else
     std::thread _thr;
+    void* hostThread = nullptr;   // pthread_self() of the running thread, for signal delivery
 #endif
     std::thread::id threadId;
     std::atomic<unsigned> references{2};
 
     std::atomic<bool> inWait{false};
     std::atomic<int> pendingException{0};
+    std::atomic<unsigned> exceptionServed{0};   // bumped after the guest handler returns
     void* wakeEvent = nullptr;
     void* stackAddress = nullptr;
     std::size_t stackSize = 0;

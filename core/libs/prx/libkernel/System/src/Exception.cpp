@@ -3,10 +3,15 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <mutex>
+#include <ucontext.h>
 #include <cstring>
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <pthread.h>
+#include <signal.h>
 #include <string>
 #include "SceTypes.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
@@ -16,11 +21,14 @@
 #include <windows.h>
 #endif
 
+extern "C" Pthread APS5_VABI scePthreadSelf();
+
 namespace {
 using GuestHandler = void (APS5_VABI *)(int, void*);
 constexpr int MaxSignals = 128;
 std::atomic<GuestHandler> handlers[MaxSignals];
 
+#ifdef _WIN32
 constexpr std::size_t XStateBytes = 1024;
 struct alignas(64) ExceptionFrame {
     alignas(64) char xstate[XStateBytes];
@@ -52,7 +60,10 @@ unsigned XMaskLow() {
     __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
     return low & 7u;
 }
+#endif
 }
+
+#ifdef _WIN32
 extern "C" unsigned DeliverXMaskLow;
 extern "C" unsigned DeliverXMaskHigh;
 unsigned DeliverXMaskLow = XMaskLow();
@@ -82,8 +93,10 @@ __asm__(".text\n"
         "movl DeliverXMaskHigh(%rip), %edx\n"
         "xsave64 (%rbx)\n"
         "1:\n"
-        "movq %rbx, %rcx\n"
-        "jmp *DeliverExceptionTarget(%rip)\n");
+         "movq %rbx, %rcx\n"
+         "jmp *DeliverExceptionTarget(%rip)\n");
+#endif
+
 
 static std::atomic<unsigned> gcedHanded, gcedInjected, gcedSkipped, gcedRun;
 
@@ -92,13 +105,111 @@ static unsigned gcWaitMillis() {
     return value;
 }
 
-void RunExceptionHandlerInline(int signum) {
+// PS5/FreeBSD `mcontext_t` as the titles' signal handlers see it. Offsets verified against the
+// reference implementation's own static asserts (mc_rip at 0xa0, mc_rsp at 0xf8) - and 0xf8 is the
+// slot the earlier zero-filled buffer wrote a self-pointer into, which is why the title's collector
+// computed a stack range inside our scratch buffer and walked stack words as objects.
+struct GuestSignalMcontext {
+    std::uint64_t mc_onstack, mc_rdi, mc_rsi, mc_rdx, mc_rcx, mc_r8, mc_r9, mc_rax, mc_rbx, mc_rbp,
+        mc_r10, mc_r11, mc_r12, mc_r13, mc_r14, mc_r15;
+    int mc_trapno;
+    std::uint16_t mc_fs, mc_gs;
+    std::uint64_t mc_addr;
+    int mc_flags;
+    std::uint16_t mc_es, mc_ds;
+    std::uint64_t mc_err, mc_rip, mc_cs, mc_rflags;
+    std::uint64_t mc_reserved[8];
+    std::uint64_t mc_rsp, mc_ss, mc_len, mc_fpformat, mc_ownedfp, mc_lbrfrom, mc_lbrto, mc_aux1,
+        mc_aux2;
+    std::uint64_t mc_fpstate[104];
+    std::uint64_t mc_fsbase, mc_gsbase, mc_spare[6];
+};
+static_assert(offsetof(GuestSignalMcontext, mc_rip) == 0xa0);
+static_assert(offsetof(GuestSignalMcontext, mc_rsp) == 0xf8);
+
+void FillFromHost(GuestSignalMcontext& out, const ucontext_t& host) {
+    const auto* g = host.uc_mcontext.gregs;
+    out.mc_rdi = g[REG_RDI]; out.mc_rsi = g[REG_RSI]; out.mc_rdx = g[REG_RDX]; out.mc_rcx = g[REG_RCX];
+    out.mc_r8 = g[REG_R8]; out.mc_r9 = g[REG_R9]; out.mc_r10 = g[REG_R10]; out.mc_r11 = g[REG_R11];
+    out.mc_r12 = g[REG_R12]; out.mc_r13 = g[REG_R13]; out.mc_r14 = g[REG_R14]; out.mc_r15 = g[REG_R15];
+    out.mc_rax = g[REG_RAX]; out.mc_rbx = g[REG_RBX]; out.mc_rbp = g[REG_RBP];
+    out.mc_rip = g[REG_RIP]; out.mc_rsp = g[REG_RSP]; out.mc_rflags = g[REG_EFL];
+    out.mc_len = sizeof(out);
+}
+
+// Registers as they are *right now*, for the self-targeted case: the volatile half is meaningless
+// across the raise, so it is left zero like the reference does, while the frame the collector must
+// scan (rsp/rbp/rbx/r12..r15 and the return address) is real.
+void CaptureSelf(GuestSignalMcontext& out, std::uint64_t rip) {
+    out = {};
+    asm volatile("movq %%rsp, %0\n\tmovq %%rbp, %1\n\tmovq %%rbx, %2\n\t"
+                 "movq %%r12, %3\n\tmovq %%r13, %4\n\tmovq %%r14, %5\n\tmovq %%r15, %6\n\t"
+                 : "=r"(out.mc_rsp), "=r"(out.mc_rbp), "=r"(out.mc_rbx), "=r"(out.mc_r12),
+                   "=r"(out.mc_r13), "=r"(out.mc_r14), "=r"(out.mc_r15)
+                 : : "memory");
+    out.mc_rip = rip;
+    out.mc_len = sizeof(out);
+}
+
+void RunExceptionHandlerInline(int signum, const void* hostContext) {
     const auto handler = handlers[signum].load();
     if (!handler) return;
     aps5::LogErr("[gced] ran signum=%d run=%u\n", signum, gcedRun.fetch_add(1) + 1);
-    alignas(16) char mcontext[0x400] = {};
-    *reinterpret_cast<void**>(mcontext + 0xf8) = mcontext;
-    handler(signum, mcontext);
+    GuestSignalMcontext ctx;
+    if (hostContext != nullptr) {
+        FillFromHost(ctx, *static_cast<const ucontext_t*>(hostContext));
+    } else {
+        CaptureSelf(ctx, reinterpret_cast<std::uint64_t>(__builtin_return_address(0)));
+    }
+    handler(signum, &ctx);
+}
+
+// TimedWait.cpp still calls the one-argument form (its declaration of it sits inside an
+// `#ifdef _WIN32` block), and the signature change that added the host context left that reference
+// unresolved on Linux: libkernel.prx carried `undefined symbol: _Z25RunExceptionHandlerInlinei`,
+// which killed the process the moment a thread with a pending guest exception reached a timed wait.
+// Keeping the old arity as a forwarder repairs every stale caller.
+void RunExceptionHandlerInline(int signum) {
+    RunExceptionHandlerInline(signum, nullptr);
+}
+
+// the shared signal number lives with the thread plumbing (Pthread.hpp)
+
+// Titles may hold a thread handle that is not the record AnyPS5's TLS resolves to for the same
+// host thread (an adopted thread gets its own), so completion has to be keyed by host id: waiting
+// on the handle's counter would time out even though the handler ran.
+std::mutex servedMutex;
+std::map<std::uintptr_t, unsigned> servedByHost;
+
+unsigned ServedOn(std::uintptr_t host) {
+    std::lock_guard lock(servedMutex);
+    return servedByHost.count(host) ? servedByHost[host] : 0u;
+}
+
+void MarkServed(std::uintptr_t host) {
+    std::lock_guard lock(servedMutex);
+    ++servedByHost[host];
+}
+
+void GuestSignalHandler(int, siginfo_t*, void* hostContext) {
+    const auto host = static_cast<std::uintptr_t>(pthread_self());
+    if (const Pthread self = scePthreadSelf(); self != nullptr) {
+        if (const int pending = self->pendingException.exchange(0)) RunExceptionHandlerInline(pending, hostContext);
+        self->exceptionServed.fetch_add(1, std::memory_order_release);
+    }
+    MarkServed(host);
+}
+
+void EnsureGuestSignal() {
+    static const bool installed = [] {
+        struct sigaction action{};
+        action.sa_sigaction = &GuestSignalHandler;
+        action.sa_flags = SA_SIGINFO;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(GuestExceptionSignal(), &action, nullptr) != 0) return false;
+        return true;
+    }();
+    (void)installed;
 }
 
 extern "C" {
@@ -124,6 +235,7 @@ int APS5_VABI sceKernelRaiseException(Pthread thread, int signum) {
         return 0;
     }
     if (!handler) return 0;
+#ifdef _WIN32
     HANDLE native = static_cast<HANDLE>(thread->nativeHandle);
 
     CONTEXT context{};
@@ -209,6 +321,57 @@ int APS5_VABI sceKernelRaiseException(Pthread thread, int signum) {
     if ((injections & 63) == 1)
         aps5::LogErr("[gced] inj n=%u h=%u skip=%u\n", injections, gcedHanded.load(), gcedSkipped.load());
     return ok ? 0 : static_cast<int>(0x80020003);
+#else
+    // Windows rewrites the target thread's context; Linux has no equivalent primitive, so deliver
+    // a host signal instead: the handler runs on the target thread and invokes the guest handler
+    // there, which is what the title's stop-the-world (il2cpp GC) waits for. Threads that were
+    // already parked in an interruptible wait are served by the same pendingException flag.
+    extern void UmtxWakeWaiters();
+    const unsigned servedBefore = thread->exceptionServed.load(std::memory_order_acquire);
+    thread->pendingException.store(signum);
+    // The interrupted context is available on Linux (a real signal handler receives it), so delivery
+    // happens on the target thread and the raiser waits - stop-the-world is only meaningful if the
+    // thread has actually reached its handler by the time this returns.
+    static const bool useSignal = std::getenv("APS5_GUEST_EXCEPTION_SIGNAL") == nullptr ||
+        std::getenv("APS5_GUEST_EXCEPTION_SIGNAL")[0] != '0';
+    if (useSignal) EnsureGuestSignal();
+    // A title's thread handle and AnyPS5's own record for the same host thread can be different
+    // objects, so identity has to be the host id: otherwise a "raise against yourself" is queued on
+    // a record nobody ever services, and the collector continues believing the thread stopped.
+    const auto here = static_cast<pthread_t>(pthread_self());
+    if (thread == scePthreadSelf() ||
+        (thread->hostThread != nullptr &&
+         static_cast<pthread_t>(reinterpret_cast<std::uintptr_t>(thread->hostThread)) == here)) {
+        RunExceptionHandlerInline(signum, nullptr);
+        return 0;
+    }
+    if (useSignal && thread->hostThread != nullptr && !thread->_finished.load(std::memory_order_acquire)) {
+        const auto id = static_cast<pthread_t>(reinterpret_cast<std::uintptr_t>(thread->hostThread));
+        if (pthread_kill(id, GuestExceptionSignal()) == 0) {
+            UmtxWakeWaiters();
+            const auto hostKey = reinterpret_cast<std::uintptr_t>(thread->hostThread);
+            const unsigned before = servedBefore + ServedOn(hostKey);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(gcWaitMillis());
+            while (ServedOn(hostKey) + servedBefore == before &&
+                   std::chrono::steady_clock::now() < deadline &&
+                   !thread->_finished.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
+            aps5::LogErr("[gced] signal linux signum=%d h=%u served=%u\n", signum,
+                         gcedInjected.fetch_add(1) + 1,
+                         ServedOn(hostKey) != before);
+            return 0;
+        }
+    }
+    if (thread->inWait.load()) {
+        UmtxWakeWaiters();
+        aps5::LogErr("[gced] hand linux signum=%d h=%u\n", signum, gcedHanded.fetch_add(1) + 1);
+        return 0;
+    }
+    thread->pendingException.store(0);
+    aps5::LogErr("[gced] skip linux signum=%d skip=%u\n", signum, gcedSkipped.fetch_add(1) + 1);
+    return static_cast<int>(0x80020003);
+#endif
 }
 
 void APS5_VABI sceKernelDebugRaiseException(int c1, int c2) {

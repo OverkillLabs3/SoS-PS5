@@ -185,6 +185,26 @@ static unsigned __stdcall StartNativeThread(void* opaque) {
 }
 #endif
 
+#if !defined(_WIN32)
+// The title's managed runtime asks each thread for its stack window before it will scan roots; the
+// Windows back end derives that from GetCurrentThreadStackLimits, and without an equivalent the
+// collector gets a null base and walks unrelated stack words as objects. Report the top of the
+// host stack minus the size the thread was created with, exactly like the Windows path.
+static void RecordHostStack(PthreadPrivate* self) {
+    pthread_attr_t host{};
+    if (pthread_getattr_np(pthread_self(), &host) != 0) return;
+    void* base = nullptr;
+    std::size_t bytes = 0;
+    const int queried = pthread_attr_getstack(&host, &base, &bytes);
+    pthread_attr_destroy(&host);
+    if (queried != 0 || base == nullptr || bytes == 0) return;
+    const auto top = reinterpret_cast<std::uintptr_t>(base) + bytes;
+    const auto want = self->stackSize != 0 ? self->stackSize : bytes;
+    self->stackAddress = reinterpret_cast<void*>(top > want ? top - want : top - bytes);
+    if (self->stackSize == 0) self->stackSize = bytes;
+}
+#endif
+
 extern "C" {
 
 int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name) {
@@ -233,9 +253,13 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     p->_thr = std::thread([self, args = std::move(args), ready = start.get_future()]() mutable {
         if (!ready.get()) return;
         self->threadId = std::this_thread::get_id();
+        self->hostThread = reinterpret_cast<void*>(static_cast<std::uintptr_t>(pthread_self()));
+        RecordHostStack(self);
+        AllowGuestExceptionSignal();
         struct ThreadGuard {
             PthreadPrivate* self;
             ~ThreadGuard() {
+                self->hostThread = nullptr;
                 currentThread = nullptr;
                 ReleaseThread(self);
             }
@@ -335,6 +359,9 @@ Pthread APS5_VABI scePthreadSelf() {
         adoptedThread->_detached = true;
         adoptedThread->_adopted = true;
         adoptedThread->threadId = std::this_thread::get_id();
+        adoptedThread->hostThread = reinterpret_cast<void*>(static_cast<std::uintptr_t>(pthread_self()));
+        RecordHostStack(adoptedThread.get());
+        AllowGuestExceptionSignal();
         currentThread = adoptedThread.get();
     }
 #endif
@@ -374,6 +401,24 @@ int APS5_VABI scePthreadGetprio(Pthread thread, int* prio) {
     if (!thread || !prio) return SCE_KERNEL_ERROR_EINVAL;
     *prio = thread->priority.load(std::memory_order_relaxed);
     return SCE_OK;
+}
+
+// PS5 is FreeBSD-based: SCHED_OTHER is 2 there, and titles check the policy they read back.
+constexpr int kSchedOther = 2;
+
+int APS5_VABI scePthreadGetschedparam(Pthread thread, int* policy, KernelSchedParam* param) {
+    if (!thread || !policy || !param) return SCE_KERNEL_ERROR_EINVAL;
+    *policy = kSchedOther;
+    param->sched_priority = thread->priority.load(std::memory_order_relaxed);
+    return SCE_OK;
+}
+
+int APS5_VABI scePthreadSetprio(Pthread thread, int prio);
+
+int APS5_VABI scePthreadSetschedparam(Pthread thread, int policy, const KernelSchedParam* param) {
+    if (!thread || !param) return SCE_KERNEL_ERROR_EINVAL;
+    (void)policy;
+    return scePthreadSetprio(thread, param->sched_priority);
 }
 
 int APS5_VABI scePthreadGetthreadid(void) {
