@@ -55,8 +55,9 @@ const IniSection kDisplaySection{L"display", L"Display"};
 const IniSection kStartupSection{L"startup", L"Startup"};
 const IniSection kQualitySection{L"quality_of_life", L"QualityOfLife"};
 const IniSection kIniSections[] = {kDisplaySection, kStartupSection, kQualitySection};
-// Not in kIniSections: that list drives the historical-name migration, and this section has no historical name.
+// Not in kIniSections: that list drives the historical-name migration, and these sections have no historical name.
 const IniSection kControllerSection{L"controller", L"controller"};
+const IniSection kLauncherSection{L"launcher", L"launcher"};
 struct IniKeyAlias { const wchar_t* legacy; const wchar_t* name; };
 const IniKeyAlias kIniKeyAliases[] = {{L"Mode", L"mode"}, {L"SkipDialogue", L"skip_dialogue"}, {L"RevealFullMap", L"reveal_full_map"}};
 // Settings of features the project no longer has. Nothing reads them; a save deletes them.
@@ -136,6 +137,11 @@ int ReadButtonIcons(const std::wstring& directory) {
     if (value == kButtonIcons[1]) return 1;
     if (value == kButtonIcons[2]) return 2;
     return 0;
+}
+
+// Only an explicit 0 skips the settings window. A missing or invalid value shows it.
+bool ReadShowLauncher(const std::wstring& directory) {
+    return ReadSetting(directory, kLauncherSection, L"show", nullptr, L"1") != L"0";
 }
 
 // The profile API adds a new section right below the last line. After Play has saved, every section header but the first is
@@ -304,6 +310,14 @@ bool NeedsDisplayModeWrite(const std::wstring& directory, bool borderless) {
     std::wstring stored;
     if (!FindSetting(directory, kDisplaySection, L"mode", nullptr, stored)) return borderless;
     return stored != DisplayModeValue(borderless);
+}
+
+const wchar_t* ShowLauncherValue(bool show) { return show ? L"1" : L"0"; }
+
+// A missing or invalid value is replaced by the canonical 0 or 1 when Play saves.
+bool NeedsShowLauncherWrite(const std::wstring& directory, bool show) {
+    std::wstring stored;
+    return !FindSetting(directory, kLauncherSection, L"show", nullptr, stored) || stored != ShowLauncherValue(show);
 }
 
 // The settings file is kSettingsHeader followed by JSON text with every character stored as four bytes.
@@ -973,14 +987,15 @@ struct Splash {
 
 struct Launcher {
     static constexpr UINT kGetDpiScaledSize = 0x02E4;  // WM_GETDPISCALEDSIZE (Windows 10 1703+), not declared for the default WINVER
-    // The layout stops growing at 175%; the window stays DPI aware, so above that it keeps its 175% size and text is still drawn sharply.
-    static constexpr UINT kMaxLayoutDpi = 168;
+    // The layout stops growing at 125%; the window stays DPI aware, so above that it keeps its 125% size and text is still drawn sharply.
+    static constexpr UINT kMaxLayoutDpi = 120;
     // Physical pixels kept free at the work-area edges when the window has to shrink or move to fit.
     static constexpr int kWorkAreaMargin = 24;
     // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
-    // monitors cannot add up rounding errors. The Quality of Life section includes the two-line Skip dialogue hint.
+    // monitors cannot add up rounding errors. The Launcher and Quality of Life sections include their two-line hints.
     static constexpr int kControllerTop = 310, kControllerHeight = 70;
-    static constexpr int kQualityTop = kControllerTop + kControllerHeight + 12, kQualityRows = 4, kSkipDialogueHint = 50;
+    static constexpr int kLauncherHint = 50, kLauncherTop = kControllerTop + kControllerHeight + 12, kLauncherHeight = 70 + kLauncherHint;
+    static constexpr int kQualityTop = kLauncherTop + kLauncherHeight + 12, kQualityRows = 4, kSkipDialogueHint = 50;
     static constexpr int kQualityHeight = 70 + 32 * (kQualityRows - 1) + kSkipDialogueHint;
     static constexpr int kCheatsTop = kQualityTop + kQualityHeight + 12, kCheatsHeight = 66, kButtonsTop = kCheatsTop + kCheatsHeight + 16;
     static constexpr int kWidth = 620, kHeight = kButtonsTop + 48;
@@ -998,6 +1013,7 @@ struct Launcher {
     HWND skipDialogueBox = nullptr;
     HWND revealFullMapBox = nullptr;
     HWND showInGameFpsBox = nullptr;
+    HWND showLauncherBox = nullptr;
     HFONT font = nullptr, heading = nullptr;
     std::vector<Placed> placed;
     int chosen = -1;
@@ -1006,6 +1022,7 @@ struct Launcher {
     bool skipDialogue = false;
     bool revealFullMap = false;
     bool showInGameFps = false;
+    bool showAtStartup = true;
     bool play = false;
     template <typename Function> static Function User32(const char* name) {
         return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
@@ -1116,6 +1133,7 @@ struct Launcher {
             self->skipDialogue = SendMessageW(self->skipDialogueBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->revealFullMap = SendMessageW(self->revealFullMapBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->showInGameFps = SendMessageW(self->showInGameFpsBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            self->showAtStartup = SendMessageW(self->showLauncherBox, BM_GETCHECK, 0, 0) == BST_CHECKED;
             self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
             DestroyWindow(hwnd);
             return 0;
@@ -1127,7 +1145,7 @@ struct Launcher {
         }
         return DefWindowProcW(hwnd, message, wParam, lParam);
     }
-    // Shows the settings and saves them when Play is pressed; false means the player closed the launcher instead.
+    // Shows the settings unless show=0, and saves them when Play is pressed; false means the player closed the launcher instead.
     bool Run(const std::wstring& directory, HICON icon) {
         borderless = ReadBorderless(directory);
         skipIntro = ReadSkipIntro(directory);
@@ -1136,6 +1154,8 @@ struct Launcher {
         skipDialogue = ReadSkipDialogue(directory);
         revealFullMap = ReadRevealFullMap(directory);
         showInGameFps = ReadShowInGameFps(directory);
+        showAtStartup = ReadShowLauncher(directory);
+        if (!showAtStartup) return true;
         // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
         // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
         // scaling the window as a bitmap, as before.
@@ -1193,7 +1213,11 @@ struct Launcher {
         control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 246, 352, 48, 0, font);
         control(L"BUTTON", L"Controller", BS_GROUPBOX, 24, kControllerTop, kWidth - 48, kControllerHeight, 0, font);
         control(L"STATIC", L"Controller Button Icons", SS_CENTERIMAGE, 44, kControllerTop + 30, 176, 28, 0, font);
-        buttonIcons = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 224, kControllerTop + 30, 172, 200, 104, font);
+        buttonIcons = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 224, kControllerTop + 30, 188, 200, 104, font);
+        control(L"BUTTON", L"Launcher", BS_GROUPBOX, 24, kLauncherTop, kWidth - 48, kLauncherHeight, 0, font);
+        showLauncherBox = checkBox(L"Show launcher at startup", 44, kLauncherTop + 30, kWidth - 88, 116);
+        control(L"STATIC", L"When disabled, the game starts directly.\nTo show this launcher again, edit launcher.ini and set [launcher] show=1", 0, 44,
+                kLauncherTop + 30 + 28 + 2, kWidth - 88, 48, 0, font);
         control(L"BUTTON", L"Quality of Life", BS_GROUPBOX, 24, kQualityTop, kWidth - 48, kQualityHeight, 0, font);
         showInGameFpsBox = checkBox(L"Show in-game FPS (F9)", 44, kQualityTop + 30, kWidth - 88, 113);
         skip = checkBox(L"Skip intro", 44, kQualityTop + 30 + 32, kWidth - 88, 102);
@@ -1222,6 +1246,7 @@ struct Launcher {
         SendMessageW(skipDialogueBox, BM_SETCHECK, skipDialogue ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(revealFullMapBox, BM_SETCHECK, revealFullMap ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(showInGameFpsBox, BM_SETCHECK, showInGameFps ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(showLauncherBox, BM_SETCHECK, showAtStartup ? BST_CHECKED : BST_UNCHECKED, 0);
 
         const int fromFile = ReadResolutionFile(directory);
         const int current = fromFile >= 0 ? fromFile : ReadIntSetting(directory, kResolutionKey);
@@ -1257,13 +1282,16 @@ struct Launcher {
                 MoveFileExW((directory + L"\\resolution.txt").c_str(), (directory + L"\\resolution.txt.old").c_str(), MOVEFILE_REPLACE_EXISTING);
             }
         }
-        // A new section is appended where it is first written, so the writes follow the window: display, controller, startup, quality_of_life.
+        // A new section is appended where it is first written; the writes go launcher, display, controller, startup, quality_of_life.
         bool iniChanged = false;
         const auto saveIni = [&](const wchar_t* section, const wchar_t* key, const wchar_t* value) {
             if (!WritePrivateProfileStringW(section, key, value, (directory + kLauncherIni).c_str())) return false;
             iniChanged = true;
             return true;
         };
+        if (play && NeedsShowLauncherWrite(directory, showAtStartup) && !saveIni(kLauncherSection.name, L"show", ShowLauncherValue(showAtStartup))) {
+            MessageBoxW(nullptr, L"The Show launcher at startup setting could not be saved. The previous setting is kept.", kTitle, MB_OK | MB_ICONWARNING);
+        }
         if (play && NeedsDisplayModeWrite(directory, borderless) && !saveIni(kDisplaySection.name, L"mode", DisplayModeValue(borderless))) {
             MessageBoxW(nullptr, L"The display mode could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
         }
