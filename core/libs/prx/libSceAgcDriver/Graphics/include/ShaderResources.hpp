@@ -96,6 +96,7 @@ public:
     void WriteBack();
 
     void MarkGpuWrites(Recorder& recorder);
+    void FlushCpuAddressableWrites();
     void WriteBackBuffers();
 
     bool NeedsCompletion() const { return bda != nullptr || guestMemory.HasCopiedWrites(); }

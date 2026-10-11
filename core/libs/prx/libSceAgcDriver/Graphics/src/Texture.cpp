@@ -1809,10 +1809,44 @@ void StorageTexture::refreshGeneration() {
     generation = *std::min_element(layerGeneration.begin(), layerGeneration.end());
 }
 
+void StorageTexture::snapshotSharedBlocks(std::uint32_t first, std::uint32_t end) {
+    constexpr std::uint64_t block = 65536;
+    const auto imageBegin = descriptor.baseAddress;
+    const auto imageEnd = descriptor.baseAddress + guestBytes;
+    const auto remember = [&](std::uint64_t from, std::uint64_t to) {
+        if (from >= to) return;
+        auto found = std::find_if(boundaryBytes.begin(), boundaryBytes.end(), [&](const BoundaryBytes& entry) { return entry.from == from && entry.to == to; });
+        if (found == boundaryBytes.end()) found = boundaryBytes.insert(boundaryBytes.end(), BoundaryBytes{from, to, {}});
+        found->bytes.resize(static_cast<std::size_t>(to - from));
+        // Raw read: a GPU-write flush would mix other pending results into what the guest CPU holds.
+        GuestMemory::ReadCommittedUnsynced(from, found->bytes);
+    };
+    if (first == 0 && imageBegin % block != 0) remember(imageBegin, std::min(imageEnd, (imageBegin + block - 1) & ~(block - 1)));
+    if (end == trackedLayers && imageEnd % block != 0) remember(std::max(imageBegin, imageEnd & ~(block - 1)), imageEnd);
+}
+
+void StorageTexture::acknowledgeWrites(std::uint32_t first, std::uint32_t end) {
+    snapshotSharedBlocks(first, end);
+    const auto begin = layerBegin(first);
+    const auto now = GuestMemory::CollectWritesUncached(begin, static_cast<std::size_t>(layerBegin(end - 1) + layerBytes(end - 1) - begin));
+    if (now == 0) return;
+    for (std::uint32_t layer = first; layer < end; ++layer) layerGeneration[layer] = std::max(layerGeneration[layer], now);
+    refreshGeneration();
+}
+
 void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count) {
     CaptureTrace::Log("image-write image=%llx first=%u count=%u generation=%llu", static_cast<unsigned long long>(descriptor.baseAddress), first, count, static_cast<unsigned long long>(generation));
     static const bool eager = std::getenv("APS5_EAGER_WRITEBACK") != nullptr || std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
-    for (std::uint32_t layer = first; layer < first + count; ++layer) layerPending[layer] = true;
+    std::uint32_t newFirst = first + count;
+    std::uint32_t newEnd = first;
+    for (std::uint32_t layer = first; layer < first + count; ++layer) {
+        if (!layerPending[layer]) {
+            newFirst = std::min(newFirst, layer);
+            newEnd = layer + 1;
+        }
+        layerPending[layer] = true;
+    }
+    if (newFirst < newEnd) acknowledgeWrites(newFirst, newEnd);
 
     if (auto source = borrowedFrom.lock(); source != nullptr && borrowedUnits.size() == trackedLayers) {
         bool superseded = false;
@@ -1983,6 +2017,18 @@ std::shared_ptr<StorageTexture> StorageTexture::FindPending(std::uint64_t addres
     for (auto* texture : pending.textures) {
 
         if (texture->descriptor.baseAddress == address && texture->guestBytes >= bytes) return texture->weak_from_this().lock();
+    }
+    return nullptr;
+}
+
+std::shared_ptr<StorageTexture> StorageTexture::FindPending(const GuestTextureResource& resource, std::uint64_t bytes) {
+    auto& pending = Pending();
+    std::lock_guard lock(pending.mutex);
+    for (auto* texture : pending.textures) {
+        if (texture->descriptor.baseAddress != resource.baseAddress || texture->guestBytes < bytes) continue;
+        if (!Texture::CanCopyFrom(*texture, resource)) continue;
+        if (resource.dccAddress != 0 && texture->descriptor.dccAddress != resource.dccAddress) continue;
+        return texture->weak_from_this().lock();
     }
     return nullptr;
 }
@@ -2883,6 +2929,11 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     std::vector<bool> skippedLayer(trackedLayers, false);
     bool skippedAny = false;
     std::size_t skipped = 0;
+    const auto sharedBlockUntouched = [&](std::uint64_t from, std::uint64_t to) {
+        const auto found = std::find_if(boundaryBytes.begin(), boundaryBytes.end(), [&](const BoundaryBytes& entry) { return entry.from == from && entry.to == to; });
+        if (found == boundaryBytes.end()) return false;
+        return GuestMemory::EqualsCommittedUnsynced(from, found->bytes);
+    };
     std::uint64_t firstStored = descriptor.baseAddress + guestBytes;
     std::uint64_t lastStored = descriptor.baseAddress;
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
@@ -2916,7 +2967,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             const auto from = std::max(at, begin);
             const auto to = std::min(at + block, end);
             if (from >= to) continue;
-            if (changedBlocks[static_cast<std::size_t>((at - spanBegin) / block)] == GuestMemory::BlockWritten) {
+            if (changedBlocks[static_cast<std::size_t>((at - spanBegin) / block)] == GuestMemory::BlockWritten && !sharedBlockUntouched(from, to)) {
                 skippedAny = true;
                 skippedLayer[layer] = true;
                 ++skipped;

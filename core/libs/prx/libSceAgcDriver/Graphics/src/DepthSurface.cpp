@@ -138,9 +138,19 @@ public:
         return texture;
     }
 
+    bool retired = false;
     bool fastCleared = false;
     float clearDepth = 0.0f;
     std::uint8_t clearStencil = 0;
+
+    bool OverlapsDepth(std::uint64_t address, std::uint64_t bytes) const {
+        const auto planeBytes = DepthSliceBytes(target.extent, target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT ? 2u : 4u);
+        return target.address != 0 && target.address < address + bytes && address < target.address + planeBytes;
+    }
+    bool OverlapsStencil(std::uint64_t address, std::uint64_t bytes) const {
+        return target.stencilAddress != 0 && target.stencilAddress < address + bytes && address < target.stencilAddress + DepthSliceBytes(target.extent, 1u);
+    }
+
     const Context context;
     const DepthTarget target;
     VkImage image = VK_NULL_HANDLE;
@@ -223,6 +233,10 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target) 
     const auto epoch = frameEpoch().load(std::memory_order_relaxed);
     for (auto& surface : surfaces()) {
         if (surface->context.device == context.device && sameSurface(surface->target, target)) {
+            if (surface->retired) {
+                surface->retired = false;
+                surface->clearedEpoch = 0;
+            }
             surface->EnsureCleared(epoch, target.clearDepth, target.clearStencil);
             surface->clearDepth = target.clearDepth;
             surface->clearStencil = target.clearStencil;
@@ -255,7 +269,7 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
     std::lock_guard lock(surfacesMutex());
     const auto& list = surfaces();
     const auto found = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) {
-        return surface->context.device == context.device && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
+        return !surface->retired && surface->context.device == context.device && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
     });
     if (found == list.rend()) return nullptr;
     (*found)->ApplyFastClear();
@@ -267,7 +281,7 @@ void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
     std::lock_guard lock(surfacesMutex());
     for (const auto& surface : surfaces()) {
         const auto htile = surface->target.htileAddress;
-        if (htile == 0 || htile < address || htile >= address + bytes) continue;
+        if (surface->retired || htile == 0 || htile < address || htile >= address + bytes) continue;
         const auto tiles = static_cast<std::uint64_t>((surface->target.extent.width + 7u) / 8u) * ((surface->target.extent.height + 7u) / 8u);
         if (address + bytes - htile >= tiles * 4u) surface->fastCleared = true;
     }
@@ -275,7 +289,19 @@ void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
 
 bool DepthSurfaceAt(std::uint64_t address) {
     std::lock_guard lock(surfacesMutex());
-    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return surface->target.address == address || surface->target.stencilAddress == address; });
+    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return !surface->retired && (surface->target.address == address || surface->target.stencilAddress == address); });
+}
+
+std::size_t RetireDepthSurfaces(const Context& context, std::uint64_t address, std::uint64_t bytes, const DepthTarget* bound) {
+    std::lock_guard lock(surfacesMutex());
+    std::size_t retired = 0;
+    for (auto& surface : surfaces()) {
+        if (surface->retired || surface->context.device != context.device || (bound != nullptr && sameSurface(surface->target, *bound))) continue;
+        if (!surface->OverlapsDepth(address, bytes) && !surface->OverlapsStencil(address, bytes)) continue;
+        surface->retired = true;
+        ++retired;
+    }
+    return retired;
 }
 
 }

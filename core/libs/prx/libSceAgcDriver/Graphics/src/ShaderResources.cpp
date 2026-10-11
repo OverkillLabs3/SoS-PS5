@@ -283,8 +283,8 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     const auto address = resource.baseAddress;
     const auto bytes = static_cast<std::size_t>(guestBytes);
 
-    auto source = StorageTexture::FindPending(address, guestBytes);
-    if (source != nullptr && (depthCompare || !Texture::CanCopyFrom(*source, resource) || MetadataMoved(*source, resource))) source.reset();
+    auto source = StorageTexture::FindPending(resource, guestBytes);
+    if (source != nullptr && depthCompare) source.reset();
     std::optional<DccKeys> keys;
     bool clearThroughKeys = false;
     if (source != nullptr && resource.dccAddress != 0 && IsDccClear(source->FilledKeys())) {
@@ -1430,7 +1430,7 @@ bool ShaderResources::fastRevalidateEach() {
         }
         if (surface.resource.dccAddress != 0 && TextureClearKeys(surface.resource, surface.bytes) != surface.keys) return false;
 
-        if (surface.source != nullptr && surface.keys != DccKeys::Uncompressed && StorageTexture::FindPending(address, surface.bytes).get() != surface.source) return false;
+        if (surface.source != nullptr && surface.keys != DccKeys::Uncompressed && StorageTexture::FindPending(surface.resource, surface.bytes).get() != surface.source) return false;
     }
     for (std::size_t i = 0; i < storageTextures.size(); ++i) {
 
@@ -1468,8 +1468,7 @@ ShaderResources::OwnRefreshFallback ShaderResources::refreshOwnObjects(std::span
         const auto bytes = static_cast<std::size_t>(surface.bytes);
         const bool imported = SampledFromStorageEligible(context, surface.resource, surface.bytes);
         overlap.sourceEligible = imported && SurfaceKey(context, source->Descriptor()) == SurfaceKey(context, surface.resource);
-        auto found = StorageTexture::FindPending(address, surface.bytes);
-        if (found != nullptr && !Texture::CanCopyFrom(*found, surface.resource)) found.reset();
+        auto found = StorageTexture::FindPending(surface.resource, surface.bytes);
         if (found != nullptr) {
             if (found != source) return OwnRefreshFallback::ForeignView;
             if (!GuestMemory::UnchangedSince(address, bytes, source->Generation())) {
@@ -2314,7 +2313,7 @@ std::shared_ptr<Texture> ShaderResources::fastTexture(const ImageRecord& record)
         if (!StorageImageCached(context, record.source.get()) || !GuestMemory::UnchangedSince(address, bytes, record.source->Generation())) return nullptr;
         if (record.resource.dccAddress != 0 && IsDccClear(record.source->FilledKeys())) return nullptr;
 
-        if (keys != DccKeys::Uncompressed && StorageTexture::FindPending(address, record.guestBytes) != record.source) return nullptr;
+        if (keys != DccKeys::Uncompressed && StorageTexture::FindPending(record.resource, record.guestBytes) != record.source) return nullptr;
     } else if (keys == DccKeys::Uncompressed && !GuestMemory::UnchangedSince(address, bytes, record.entryGeneration)) {
         return nullptr;
     }
@@ -2546,6 +2545,16 @@ void ShaderResources::WriteBack() {
     if (SkipWriteBack()) return;
     for (std::size_t index = 0; index < storageTextures.size(); ++index) {
         if (storageWritten[index]) storageTextures[index]->MarkDirty();
+    }
+}
+
+void ShaderResources::FlushCpuAddressableWrites() {
+    // Guest CPU reads are not trapped, so a linear image must reach guest memory when its dispatch is recorded.
+    if (SkipWriteBack()) return;
+    for (std::size_t index = 0; index < storageTextures.size(); ++index) {
+        if (!storageWritten[index] || !storageTextures[index]->CpuAddressable()) continue;
+        const auto& image = *storageTextures[index];
+        StorageTexture::FlushPending(image.Descriptor().baseAddress, static_cast<std::size_t>(image.GuestBytes()), nullptr, "linear storage write");
     }
 }
 

@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
@@ -30,6 +31,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -2051,6 +2053,539 @@ void metadataPassTests(const Device& device, Recorder& recorder) {
     Require(keysUncompressed() && memoryHolds({0xff, 0xff, 0xff, 0xff}), "a pass over a remade resident image did not store the 1111 value");
 }
 
+void reusedAddressTests(const Device& device, Recorder& recorder) {
+    const auto& base = device.GetContext();
+    constexpr std::size_t bytes = 0x40000;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the reused address block");
+    std::memset(block, 0, bytes);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        ~Unregister() {
+            ClearCachedTextures(context.device);
+            GuestAllocations::Mutation mutation;
+            mutation.Remove(block);
+        }
+    } unregister{base, block};
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+    const auto describe = [&](std::uint32_t width, std::uint32_t height, std::uint32_t format) {
+        GuestTextureResource resource{};
+        resource.baseAddress = address;
+        resource.width = width;
+        resource.height = height;
+        resource.mipCount = 1;
+        resource.tileMode = TextureTileMode::kR64KBX;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = format;
+        resource.dstSelX = 4;
+        resource.dstSelY = 5;
+        resource.dstSelZ = 6;
+        resource.dstSelW = 7;
+        return resource;
+    };
+    const auto large = describe(256, 144, 56);
+    const auto small = describe(40, 22, 36);
+    const auto paint = [&](const std::shared_ptr<StorageTexture>& image, VkClearColorValue value) {
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const auto commands = recorder.Commands();
+        recorder.Keep(image);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        image->MarkDirty();
+    };
+    const auto texelsOf = [&](const std::shared_ptr<StorageTexture>& image, std::uint32_t width, std::uint32_t height) {
+        Buffer readback(context, static_cast<std::size_t>(width) * height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        const auto commands = recorder.Commands();
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {width, height, 1};
+        context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        std::vector<std::uint32_t> texels(static_cast<std::size_t>(width) * height);
+        std::memcpy(texels.data(), readback.Bytes().data(), texels.size() * sizeof(std::uint32_t));
+        return texels;
+    };
+    const auto uniform = [](const std::vector<std::uint32_t>& texels) {
+        return std::all_of(texels.begin(), texels.end(), [&](std::uint32_t texel) { return texel == texels.front(); });
+    };
+    const VkClearColorValue red{{1.0f, 0.0f, 0.0f, 1.0f}};
+    const VkClearColorValue green{{0.0f, 1.0f, 0.0f, 1.0f}};
+    const auto old = CachedStorageSurface(context, large);
+    paint(old, red);
+    const auto oldTexels = texelsOf(old, 256, 144);
+    Require(uniform(oldTexels) && oldTexels.front() != 0, "the first image does not hold its color");
+    Require(StorageTexture::FindPending(large, old->GuestBytes()) == old, "the pending image is not found by its own descriptor");
+    const auto reused = CachedStorageSurface(context, small);
+    Require(reused != old && reused->Descriptor().width == 40 && reused->Descriptor().baseAddress == address, "the reused address did not get its own image");
+    paint(reused, green);
+    Require(StorageTexture::FindPending(small, reused->GuestBytes()) == reused, "a lookup for the new descriptor returned another image");
+    const auto stale = StorageTexture::FindPending(large, old->GuestBytes());
+    Require(stale == nullptr || stale == old, "a lookup for the old descriptor returned the new image");
+    auto mismatched = small;
+    mismatched.tileMode = TextureTileMode::kStandard4KB;
+    Require(StorageTexture::FindPending(mismatched, reused->GuestBytes()) == nullptr, "a lookup with another tile mode matched a pending image");
+    mismatched = small;
+    mismatched.width = 41;
+    Require(StorageTexture::FindPending(mismatched, reused->GuestBytes()) == nullptr, "a lookup with another extent matched a pending image");
+    mismatched = small;
+    mismatched.dccAddress = address + 0x1000;
+    Require(StorageTexture::FindPending(mismatched, reused->GuestBytes()) == nullptr, "a lookup under other metadata matched a pending image");
+    Require(CachedStorageSurface(context, small) == reused, "the reused descriptor did not keep its resident image");
+    const auto reusedTexels = texelsOf(reused, 40, 22);
+    Require(uniform(reusedTexels) && reusedTexels.front() != 0 && reusedTexels.front() != oldTexels.front(), "the new image holds data of the previous image");
+}
+
+void depthSurfaceReuseTests(const Device& device, Recorder& recorder) {
+    const auto& base = device.GetContext();
+    constexpr std::uint32_t width = 1280, height = 720;
+    const auto colorBytes = static_cast<std::size_t>(DescribeSurface([&] {
+        GuestTextureResource resource{};
+        resource.width = width;
+        resource.height = height;
+        resource.mipCount = 1;
+        resource.tileMode = TextureTileMode::kR64KBX;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = 56;
+        return resource;
+    }()).guestBytes);
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, colorBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, colorBytes);
+#endif
+    Require(block != nullptr, "cannot allocate the reused depth block");
+    std::memset(block, 0, colorBytes);
+    const auto stencilPlane = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, colorBytes, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        ~Unregister() {
+            ClearCachedTextures(context.device);
+            GuestAllocations::Mutation mutation;
+            mutation.Remove(block);
+        }
+    } unregister{base, block};
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+
+    DepthTarget old{};
+    old.address = 0x7000000000ull;
+    old.stencilAddress = stencilPlane;
+    old.extent = {width, height};
+    old.format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+    old.clearDepth = 1.0f;
+    DepthTarget other = old;
+    other.address = 0x7100000000ull;
+    other.stencilAddress = 0x7100400000ull;
+    const auto depthBytes = DepthSliceBytes(old.extent, 4);
+    const auto stencilBytes = DepthSliceBytes(old.extent, 1);
+    const auto claims = [&](std::uint64_t address) { return DepthSurfaceAt(address); };
+    const auto sampledAs = [&](std::uint64_t address) {
+        GuestTextureResource resource{};
+        resource.baseAddress = address;
+        return DepthSurfaceTexture(context, {}, resource, {}) != nullptr;
+    };
+    const auto bind = [&] {
+        DepthSurfaceView(context, old);
+        DepthSurfaceView(context, other);
+    };
+    bind();
+    Require(claims(old.address) && claims(stencilPlane) && claims(other.stencilAddress), "bound depth surfaces are not registered");
+
+    GuestTextureResource resource{};
+    resource.baseAddress = stencilPlane;
+    resource.width = width;
+    resource.height = height;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kR64KBX;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dstSelX = 4;
+    resource.dstSelY = 5;
+    resource.dstSelZ = 6;
+    resource.dstSelW = 7;
+    bool refused = false;
+    try {
+        CachedStorageSurface(context, resource);
+    } catch (const std::runtime_error&) {
+        refused = true;
+    }
+    Require(refused, "a storage image over a registered depth plane was accepted");
+
+    for (int i = 0; i < 300; ++i) DepthSurfaceNoteFlip();
+    Require(RetireDepthSurfaces(context, stencilPlane, colorBytes, &old) == 0 && claims(stencilPlane), "the bound depth surface was retired");
+    Require(RetireDepthSurfaces(context, 0x7200000000ull, colorBytes, nullptr) == 0, "a disjoint range retired a surface");
+    Require(RetireDepthSurfaces(context, old.stencilAddress + stencilBytes, 4096, nullptr) == 0 && claims(stencilPlane), "a range past the stencil plane retired it");
+    Require(RetireDepthSurfaces(context, stencilPlane, colorBytes, nullptr) == 1, "the aliased depth surface was not retired exactly once");
+    Require(!claims(stencilPlane) && !claims(old.address) && !sampledAs(stencilPlane) && !sampledAs(old.address), "the retired surface still claims its planes");
+    Require(claims(other.address) && claims(other.stencilAddress), "an unrelated depth surface was affected");
+
+    const auto image = CachedStorageSurface(context, resource);
+    Require(image != nullptr && image->Attachable() && image->Descriptor().baseAddress == stencilPlane, "the reused stencil address did not become a color image");
+    Require(RetireDepthSurfaces(context, stencilPlane, colorBytes, nullptr) == 0 && !claims(stencilPlane), "repeated reuse resurrected the retired surface");
+    DepthSurfaceView(context, old);
+    Require(claims(stencilPlane) && claims(old.address), "a depth surface rebound by a draw was not registered again");
+
+    const auto partial = [&](std::uint64_t address, std::uint64_t bytes, const char* what) {
+        DepthSurfaceView(context, old);
+        Require(RetireDepthSurfaces(context, address, bytes, nullptr) == 1 && !claims(old.address), what);
+    };
+    partial(old.address + depthBytes - 4096, 8192, "a partial overlap with the depth plane did not retire it");
+    partial(old.address - 4096, 8192, "a range reaching into the depth plane did not retire it");
+    partial(stencilPlane + stencilBytes - 1, 4096, "a partial overlap with the stencil plane did not retire it");
+    partial(stencilPlane - 4096, 8192, "a range reaching into the stencil plane did not retire it");
+    recorder.Submit();
+    device.WaitQueue();
+    recorder.Sync();
+    ClearDepthSurfaces(context.device);
+}
+
+void refreshPendingUnitsTests(const Device& device, Recorder& recorder, std::uint32_t width, std::uint32_t height) {
+    GuestTextureResource resource{};
+    resource.width = width;
+    resource.height = height;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kR64KBX;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dstSelX = 4;
+    resource.dstSelY = 5;
+    resource.dstSelZ = 6;
+    resource.dstSelW = 7;
+    const auto layout = DescribeSurface(resource);
+    const std::size_t bytes = layout.guestBytes;
+    const std::size_t units = bytes / 65536;
+    void* block = AllocateWatched(bytes, 65536);
+    if (block == nullptr) {
+        std::cout << "no write watching: pending unit refresh not tested\n";
+        return;
+    }
+    std::memset(block, 0, bytes);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    resource.baseAddress = address;
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true);
+    }
+    const auto& base = device.GetContext();
+    struct Unregister {
+        const Context& context;
+        void* block;
+        std::uint64_t address;
+        std::size_t bytes;
+        ~Unregister() {
+            ClearCachedTextures(context.device);
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, address, bytes);
+        }
+    } unregister{base, block, address, bytes};
+    if (!AgcDriver::GuestMemory::Watched(address, bytes)) {
+        std::cout << "guest memory is not write watched: pending unit refresh not tested\n";
+        return;
+    }
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+    const auto texelsOf = [&](const std::shared_ptr<StorageTexture>& image) {
+        Buffer readback(context, static_cast<std::size_t>(width) * height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        const auto commands = recorder.Commands();
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {width, height, 1};
+        context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        std::vector<std::uint32_t> texels(static_cast<std::size_t>(width) * height);
+        std::memcpy(texels.data(), readback.Bytes().data(), texels.size() * sizeof(std::uint32_t));
+        return texels;
+    };
+    const auto paint = [&](const std::shared_ptr<StorageTexture>& image, VkClearColorValue value) {
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const auto commands = recorder.Commands();
+        recorder.Keep(image);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        image->MarkDirty();
+    };
+    constexpr std::uint32_t blockTexels = 128;
+    const auto blocksPerRow = layout.mips.front().blocksPerRow;
+    const auto unitOf = [&](std::size_t texel) {
+        return (texel / width / blockTexels) * blocksPerRow + (texel % width) / blockTexels;
+    };
+    struct Census {
+        std::size_t gpu = 0, cpu = 0, other = 0;
+        std::vector<std::size_t> cpuUnits, otherUnits;
+    };
+    const auto census = [&](const std::vector<std::uint32_t>& texels, std::uint32_t gpuTexel, std::uint32_t cpuTexel) {
+        Census result;
+        for (std::size_t i = 0; i < texels.size(); ++i) {
+            const auto unit = unitOf(i);
+            if (texels[i] == gpuTexel) {
+                ++result.gpu;
+            } else if (texels[i] == cpuTexel) {
+                ++result.cpu;
+                if (std::find(result.cpuUnits.begin(), result.cpuUnits.end(), unit) == result.cpuUnits.end()) result.cpuUnits.push_back(unit);
+            } else {
+                ++result.other;
+                if (std::find(result.otherUnits.begin(), result.otherUnits.end(), unit) == result.otherUnits.end()) result.otherUnits.push_back(unit);
+            }
+        }
+        return result;
+    };
+    const auto summary = [&](const Census& c) {
+        std::string text = std::to_string(width) + "x" + std::to_string(height) + " (" + std::to_string(units) + " units): gpu texels " + std::to_string(c.gpu) + ", cpu texels " + std::to_string(c.cpu) + " in units";
+        for (const auto unit : c.cpuUnits) text += " " + std::to_string(unit);
+        text += ", other texels " + std::to_string(c.other) + " in units";
+        for (const auto unit : c.otherUnits) text += " " + std::to_string(unit);
+        return text;
+    };
+    const VkClearColorValue red{{1.0f, 0.0f, 0.0f, 1.0f}};
+    constexpr std::uint32_t cpuTexel = 0x11223344u;
+    constexpr std::size_t cpuUnit = 1;
+    Require(units > cpuUnit + 1, "the test surface has too few units");
+    AgcDriver::GuestMemory::BeginCollectFrame();
+    const auto image = CachedStorageSurface(context, resource);
+    Require(!image->CpuAddressable(), "a render target layout is CPU addressable");
+    paint(image, red);
+    const auto gpuTexel = texelsOf(image).front();
+    Require(gpuTexel != 0, "the GPU result is empty");
+    image->Refresh();
+    const auto quiet = census(texelsOf(image), gpuTexel, cpuTexel);
+    Require(quiet.gpu == static_cast<std::size_t>(width) * height, "a refresh without a CPU write changed the GPU result: " + summary(quiet));
+    auto* words = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(block) + cpuUnit * 65536);
+    AgcDriver::GuestMemory::BeginCollectFrame();
+    std::fill(words, words + 65536 / 4, cpuTexel);
+    image->Refresh();
+    const auto changed = census(texelsOf(image), gpuTexel, cpuTexel);
+    Require(changed.other == 0, "a unit became neither the GPU result nor the CPU data: " + summary(changed));
+    Require(changed.cpuUnits.size() == 1 && changed.cpuUnits.front() == cpuUnit, "the CPU-written unit did not keep the CPU data: " + summary(changed));
+    Require(changed.gpu + changed.cpu == static_cast<std::size_t>(width) * height && changed.gpu != 0, "the untouched units lost the GPU result: " + summary(changed));
+
+    AgcDriver::GuestMemory::BeginCollectFrame();
+    image->Refresh();
+    std::fill(words, words + 65536 / 4, cpuTexel);
+    paint(image, red);
+    image->Refresh();
+    const auto sameFrame = census(texelsOf(image), gpuTexel, cpuTexel);
+    AgcDriver::GuestMemory::BeginCollectFrame();
+    image->Refresh();
+    const auto nextFrame = census(texelsOf(image), gpuTexel, cpuTexel);
+    Require(sameFrame.gpu == static_cast<std::size_t>(width) * height, "a CPU write older than the GPU draw replaced the draw in its own frame: " + summary(sameFrame));
+    Require(nextFrame.gpu == static_cast<std::size_t>(width) * height, "a CPU write detected a frame late replaced a newer GPU draw: " + summary(nextFrame));
+    StorageTexture::FlushPending(address, bytes, nullptr, "test");
+    recorder.Sync();
+}
+
+void linearCaptureTests(const Device& device, Recorder& recorder, std::uint32_t width, std::uint32_t height, bool copiedWriteBack) {
+    constexpr std::size_t unit = 65536;
+    constexpr std::size_t offset = 0x100;
+    GuestTextureResource resource{};
+    resource.width = width;
+    resource.height = height;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kLinear;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dstSelX = 4;
+    resource.dstSelY = 5;
+    resource.dstSelZ = 6;
+    resource.dstSelW = 7;
+    const std::size_t bytes = DescribeSurface(resource).guestBytes;
+    Require(bytes == static_cast<std::size_t>(width) * height * 4, "a linear RGBA image is not width * height * 4 bytes");
+    const std::size_t total = (offset + bytes + unit - 1) / unit * unit + unit;
+    void* block = AllocateWatched(total, unit);
+    if (block == nullptr) {
+        std::cout << "no write watching: linear capture not tested\n";
+        return;
+    }
+    constexpr std::uint32_t stale = 0xaaaaaaaau;
+    auto* words = static_cast<std::uint32_t*>(block);
+    std::fill(words, words + total / 4, stale);
+    const auto address = reinterpret_cast<std::uint64_t>(block) + offset;
+    resource.baseAddress = address;
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, total, true, true);
+    }
+    const auto& base = device.GetContext();
+    struct Unregister {
+        const Context& context;
+        void* block;
+        std::uint64_t address;
+        std::size_t bytes;
+        std::size_t total;
+        ~Unregister() {
+            ClearCachedTextures(context.device);
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, address, bytes);
+        }
+    } unregister{base, block, address, bytes, total};
+    if (!AgcDriver::GuestMemory::Watched(address, bytes)) {
+        std::cout << "guest memory is not write watched: linear capture not tested\n";
+        return;
+    }
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+    if (copiedWriteBack) context.hostImportAlignment = 0;
+    const bool direct = HostImportFor(context, address, bytes) != nullptr;
+    std::cout << "linear capture " << width << "x" << height << ": " << bytes / unit << " full units, base +0x" << std::hex << offset << std::dec << ", " << (direct ? "direct" : "copied") << " write-back\n";
+
+    const auto texels = bytes / 4;
+    const auto image0 = reinterpret_cast<std::uint32_t*>(address);
+    const auto pattern = [&](std::uint32_t capture, std::size_t texel) { return (capture << 24) | static_cast<std::uint32_t>(texel); };
+    const auto unitOf = [&](std::size_t texel) { return (address - reinterpret_cast<std::uint64_t>(block) + texel * 4) / unit; };
+    const auto describe = [&](std::size_t texel) {
+        return "texel (" + std::to_string(texel % width) + "," + std::to_string(texel / width) + ") byte +0x" + [&] { char text[32]; std::snprintf(text, sizeof(text), "%zx", texel * 4); return std::string(text); }() + " unit " + std::to_string(unitOf(texel));
+    };
+    const auto paint = [&](const std::shared_ptr<StorageTexture>& image, std::uint32_t capture) {
+        auto staging = std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        auto* source = reinterpret_cast<std::uint32_t*>(staging->Bytes().data());
+        for (std::size_t texel = 0; texel < texels; ++texel) source[texel] = pattern(capture, texel);
+        const auto commands = recorder.Commands();
+        recorder.Keep(image);
+        recorder.Keep(staging);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkBufferImageCopy copy{};
+        copy.bufferRowLength = width;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {width, height, 1};
+        context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, staging->Handle(), image->Image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        image->MarkDirty();
+    };
+    const auto flush = [&] {
+        StorageTexture::FlushPending(address, bytes, nullptr, "test");
+        recorder.Sync();
+    };
+    const auto expect = [&](std::uint32_t capture, const std::function<bool(std::size_t)>& cpuOwned, const std::string& what) {
+        std::size_t wrong = 0, first = texels;
+        for (std::size_t texel = 0; texel < texels; ++texel) {
+            if (cpuOwned(texel) || image0[texel] == pattern(capture, texel)) continue;
+            if (wrong++ == 0) first = texel;
+        }
+        Require(wrong == 0, what + ": " + std::to_string(wrong) + " texels are not the GPU result, first " + describe(first) + " holds 0x" + [&] { char text[16]; std::snprintf(text, sizeof(text), "%08x", image0[first]); return std::string(text); }());
+    };
+    const auto none = [](std::size_t) { return false; };
+    const auto churn = [&] {
+        words[0x10 / 4] = 0xc0de0001u;
+        words[(offset + bytes + 0x40) / 4] = 0xc0de0002u;
+    };
+    const auto neighbours = [&] {
+        Require(words[0x10 / 4] == 0xc0de0001u && words[(offset + bytes + 0x40) / 4] == 0xc0de0002u, "the write-back changed memory outside the image");
+    };
+    const auto readTexels = [&](const std::shared_ptr<StorageTexture>& image) {
+        Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        const auto commands = recorder.Commands();
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy copy{};
+        copy.bufferRowLength = width;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {width, height, 1};
+        context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        std::vector<std::uint32_t> result(texels);
+        std::memcpy(result.data(), readback.Bytes().data(), bytes);
+        return result;
+    };
+
+    const auto fillUnit = [&](std::size_t index, std::uint32_t value) {
+        const auto begin = std::max<std::size_t>(index * unit, offset);
+        const auto end = std::min<std::size_t>((index + 1) * unit, offset + bytes);
+        std::fill(words + begin / 4, words + end / 4, value);
+        return std::pair<std::size_t, std::size_t>{(begin - offset) / 4, (end - offset) / 4};
+    };
+    const std::size_t units = (offset + bytes + unit - 1) / unit;
+
+    {
+        AgcDriver::GuestMemory::BeginCollectFrame();
+        const auto image = CachedStorageSurface(context, resource);
+        Require(image->CpuAddressable(), "a linear storage image is not CPU addressable");
+        paint(image, 1);
+        flush();
+        expect(1, none, "a plain write-back");
+
+        paint(image, 2);
+        churn();
+        flush();
+        expect(2, none, "CPU writes next to the image blocked the write-back");
+        neighbours();
+
+        for (const auto index : {std::size_t{0}, units / 2, units - 1}) {
+            paint(image, 3);
+            churn();
+            const auto [first, last] = fillUnit(index, 0xc0de0003u);
+            flush();
+            expect(3, [&](std::size_t texel) { return texel >= first && texel < last; }, "a CPU write to unit " + std::to_string(index));
+            for (std::size_t texel = first; texel < last; ++texel) Require(image0[texel] == 0xc0de0003u, "the CPU data of unit " + std::to_string(index) + " was replaced at " + describe(texel));
+            neighbours();
+            image->Refresh();
+            Require(readTexels(image)[first] == 0xc0de0003u, "the image lost the CPU data of unit " + std::to_string(index) + " after the refresh");
+        }
+
+        for (std::uint32_t capture = 1; capture <= 3; ++capture) {
+            AgcDriver::GuestMemory::BeginCollectFrame();
+            paint(image, capture);
+            churn();
+            flush();
+            expect(capture, none, "capture " + std::to_string(capture));
+            neighbours();
+            image->Refresh();
+            expect(capture, none, "capture " + std::to_string(capture) + " after a refresh");
+            const auto gpu = readTexels(image);
+            for (std::size_t texel = 0; texel < texels; ++texel) {
+                if (gpu[texel] != pattern(capture, texel)) Require(false, "the image does not hold capture " + std::to_string(capture) + " after the refresh, first " + describe(texel));
+            }
+        }
+    }
+
+    for (std::uint32_t capture = 4; capture <= 6; ++capture) {
+        ClearCachedTextures(context.device);
+        const auto fresh = CachedStorageSurface(context, resource);
+        AgcDriver::GuestMemory::BeginCollectFrame();
+        paint(fresh, capture);
+        churn();
+        flush();
+        expect(capture, none, "capture " + std::to_string(capture) + " over the memory of the previous one");
+        neighbours();
+    }
+}
+
 void dataWordPositionsTests() {
     using AgcDriver::DataWordPositions;
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> runs{{0x1000, 0x1010}, {0x2000, 0x2008}};
@@ -2452,6 +2987,14 @@ int main() {
         firstLayerViewTests(device, recorder);
         metadataPassTests(device, recorder);
         pendingKeyStoreTests(device, recorder);
+        reusedAddressTests(device, recorder);
+        refreshPendingUnitsTests(device, recorder, 256, 144);
+        refreshPendingUnitsTests(device, recorder, 1280, 720);
+        depthSurfaceReuseTests(device, recorder);
+        for (const bool copied : {false, true}) {
+            linearCaptureTests(device, recorder, 256, 144, copied);
+            linearCaptureTests(device, recorder, 1280, 720, copied);
+        }
         std::cout << "Recorder read tracking and label tests passed\n";
         return 0;
     } catch (const std::exception& error) {
