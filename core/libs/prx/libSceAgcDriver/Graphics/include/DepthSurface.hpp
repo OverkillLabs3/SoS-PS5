@@ -17,6 +17,7 @@ void ClearDepthSurfaces(VkDevice device);
 
 void DepthSurfaceNoteFlip();
 bool DepthSurfaceAt(std::uint64_t address);
+std::size_t RetireDepthSurfaces(const Context& context, std::uint64_t address, std::uint64_t bytes, const DepthTarget* bound);
 
 void DepthSurfaceStats(std::uint64_t& live, std::uint64_t& created);
 void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);

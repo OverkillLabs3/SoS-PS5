@@ -153,6 +153,7 @@ public:
     void SetCached(bool value) { cached.store(value, std::memory_order_release); }
 
     static std::shared_ptr<StorageTexture> FindPending(std::uint64_t address, std::uint64_t bytes);
+    static std::shared_ptr<StorageTexture> FindPending(const GuestTextureResource& resource, std::uint64_t bytes);
 
     enum class FillCover { None, Exact, Inside, Around, Straddle, Several, Keys, Layer };
     struct FillCoverage {
@@ -183,6 +184,8 @@ public:
 
     std::uint64_t Version() const { return version; }
     std::uint64_t Generation() const { return generation; }
+
+    bool CpuAddressable() const { return descriptor.tileMode == TextureTileMode::kLinear; }
 
     DccKeys UploadedKeys() const { return uploadedKeys; }
     DccKeys FilledKeys() const { return filledKeys; }
@@ -225,6 +228,8 @@ private:
     void refreshGeneration();
 
     void markLayersPending(std::uint32_t first, std::uint32_t count);
+    void acknowledgeWrites(std::uint32_t first, std::uint32_t end);
+    void snapshotSharedBlocks(std::uint32_t first, std::uint32_t end);
 
     void reconcilePending();
 
@@ -276,6 +281,13 @@ private:
     std::vector<std::uint64_t> layerGeneration;
     std::vector<bool> layerPending;
     bool blockUnits = false;
+
+    struct BoundaryBytes {
+        std::uint64_t from;
+        std::uint64_t to;
+        std::vector<std::byte> bytes;
+    };
+    std::vector<BoundaryBytes> boundaryBytes;
 
     std::uint32_t partialStores = 0;
     std::uint64_t partialWindowStart = 0;

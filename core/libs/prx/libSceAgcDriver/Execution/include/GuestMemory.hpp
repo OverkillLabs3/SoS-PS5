@@ -26,6 +26,7 @@ Commitment DescribeCommitted(std::uint64_t address, std::size_t bytes, bool writ
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment = 1);
 
 void ReadCommitted(std::uint64_t address, std::span<std::byte> destination);
+void ReadCommittedUnsynced(std::uint64_t address, std::span<std::byte> destination);
 bool EqualsCommitted(std::uint64_t address, std::span<const std::byte> bytes);
 
 bool EqualsCommittedUnsynced(std::uint64_t address, std::span<const std::byte> bytes);

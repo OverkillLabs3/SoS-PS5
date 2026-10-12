@@ -2977,6 +2977,7 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
         writers->push_back(kept);
     }
     recordStep(PhaseRecordCompletion);
+    resources.FlushCpuAddressableWrites();
 }
 
 VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipeOut) {

@@ -1578,6 +1578,11 @@ void ReadCommitted(std::uint64_t address, std::span<std::byte> destination) {
     FlushGpuWrites(address, destination.size());
     const TimedAccess timed(CounterRead, destination.size());
     CountReadCaller(__builtin_return_address(0));
+    ReadCommittedUnsynced(address, destination);
+}
+
+void ReadCommittedUnsynced(std::uint64_t address, std::span<std::byte> destination) {
+    if (destination.empty()) return;
     if (Accessible(reinterpret_cast<const void*>(address), destination.size())) {
         std::memcpy(destination.data(), reinterpret_cast<const void*>(address), destination.size());
         return;

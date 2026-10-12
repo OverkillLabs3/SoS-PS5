@@ -1818,6 +1818,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
 
         static const bool residentTargets = std::getenv("APS5_NO_RESIDENT_TARGETS") == nullptr;
 
+        RetireDepthSurfaces(context, color.address, color.bytes, state.depth ? &*state.depth : nullptr);
+
         bool dumpOwed = false;
         if (dumpLimit != 0) {
             std::lock_guard lock(dumpMutex);
@@ -2347,7 +2349,7 @@ void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass)
         }
         if (resident != nullptr) {
             const char* refusal = nullptr;
-            const bool current = keys == DccKeys::ClearRegister ? clearToTexel(*resident, texel, color.elementBytes, refusal) : StorageTexture::FindPending(color.address, color.bytes) == resident || resident->UploadedKeys() == keys;
+            const bool current = keys == DccKeys::ClearRegister ? clearToTexel(*resident, texel, color.elementBytes, refusal) : StorageTexture::FindPending(SurfaceForTarget(color), color.bytes) == resident || resident->UploadedKeys() == keys;
             if (current) {
                 resident->MarkDirty();
                 MarkDccUncompressed(context, color.dccAddress, color.bytes);
