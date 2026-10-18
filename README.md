@@ -89,8 +89,8 @@ The result is `release\SonsOfSparta-PS5-Native-0.4.1-win64`, the same layout as 
 ## Linux
 
 The compatibility layer builds natively on Linux, and the game reaches its main menu and holds 60 FPS in
-gameplay. **There is no Linux launcher and no packaged Linux build yet**, so this is a source-only path for
-now. What the Windows launcher does for you on first start has no Linux equivalent in this repository:
+gameplay. A Python tool under `tools/sos_linux` does what the Windows launcher does on first start, so
+preparation no longer has to be done by hand:
 
 - converting `eboot.bin` to an ELF, and converting each bundled `sce_module` to the `.prx.guest.prx` form the
   loader expects;
@@ -98,8 +98,19 @@ now. What the Windows launcher does for you on first start has no Linux equivale
   resolve them;
 - seeding the settings file, then relinking with `--registry --skip-syscall-check`.
 
-Until those exist, running on Linux means doing that work yourself with your own tooling. The build itself is
-supported and is what the rest of this section covers.
+Put your own decrypted game files in a folder, build the section below, then:
+
+```
+python3 -m tools.sos_linux prepare --dump <game-folder> --out prepared
+python3 -m tools.sos_linux launch --out prepared
+```
+
+`prepared/` (and the `shader_cache` folder inside it) is the only thing the tool writes; your dump is read
+only. `python3 -m tools.sos_linux status` prints what a run produced, and `--dry-run` lists the steps
+without touching anything. The PowerShell wrapper `tools/package.ps1` used by the Windows launcher is not
+touched.
+
+The build itself is supported and is what the rest of this section covers.
 
 ### Building
 
