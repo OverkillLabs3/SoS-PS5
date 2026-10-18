@@ -5,13 +5,17 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#ifndef _WIN32
 #include <ucontext.h>
+#endif
 #include <cstring>
 #include <atomic>
 #include <chrono>
 #include <thread>
+#ifndef _WIN32
 #include <pthread.h>
 #include <signal.h>
+#endif
 #include <string>
 #include "SceTypes.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
@@ -105,6 +109,7 @@ static unsigned gcWaitMillis() {
     return value;
 }
 
+#ifndef _WIN32
 // PS5/FreeBSD `mcontext_t` as the titles' signal handlers see it. Offsets verified against the
 // reference implementation's own static asserts (mc_rip at 0xa0, mc_rsp at 0xf8) - and 0xf8 is the
 // slot the earlier zero-filled buffer wrote a self-pointer into, which is why the title's collector
@@ -172,9 +177,22 @@ void RunExceptionHandlerInline(int signum, const void* hostContext) {
 void RunExceptionHandlerInline(int signum) {
     RunExceptionHandlerInline(signum, nullptr);
 }
+#else
+// Windows keeps the reference implementation's form: a zero-filled buffer with the self-pointer
+// the callers' handlers must tolerate at the mc_rsp slot.
+void RunExceptionHandlerInline(int signum) {
+    const auto handler = handlers[signum].load();
+    if (!handler) return;
+    aps5::LogErr("[gced] ran signum=%d run=%u\n", signum, gcedRun.fetch_add(1) + 1);
+    alignas(16) char mcontext[0x400] = {};
+    *reinterpret_cast<void**>(mcontext + 0xf8) = mcontext;
+    handler(signum, mcontext);
+}
+#endif
 
 // the shared signal number lives with the thread plumbing (Pthread.hpp)
 
+#ifndef _WIN32
 // Titles may hold a thread handle that is not the record AnyPS5's TLS resolves to for the same
 // host thread (an adopted thread gets its own), so completion has to be keyed by host id: waiting
 // on the handle's counter would time out even though the handler ran.
@@ -211,6 +229,7 @@ void EnsureGuestSignal() {
     }();
     (void)installed;
 }
+#endif // !_WIN32
 
 extern "C" {
 

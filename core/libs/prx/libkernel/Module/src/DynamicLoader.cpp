@@ -205,6 +205,9 @@ void* APS5_VABI dlopen_nid_postfix_impl(const char* path, int flags) {
         return reinterpret_cast<void*>(handle);
     } catch (const std::exception& error) { Error(error.what()); return nullptr; }
 }
+// Process-wide lookup helpers for handle-0 dlsym; Linux only (the dlsym call site guards their use
+// with #ifndef _WIN32, and they depend on <link.h>/<dlfcn.h> types Windows does not have).
+#ifndef _WIN32
 std::uintptr_t MainProgramBase() {
     static const std::uintptr_t base = [] {
         struct Scan {
@@ -236,6 +239,7 @@ void* DefaultScopeSymbol(const char* symbolName) {
     auto* result = ::dlsym(RTLD_DEFAULT, symbolName);
     return FromGuestModule(result) ? result : nullptr;
 }
+#endif // !_WIN32
 
 void* APS5_VABI dlsym_nid_postfix_impl(void* handle, const char* name);
 void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name) {
