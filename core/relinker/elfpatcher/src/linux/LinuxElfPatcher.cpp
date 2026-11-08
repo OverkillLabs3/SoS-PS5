@@ -101,6 +101,7 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     for (char c : runPath)
         buf.push_back(static_cast<std::uint8_t>(c));
     buf.push_back(0);
+    const std::uint64_t dynStrSize = runPathStrOff + runPath.size() + 1;
     alignBuf(buf, kDynStrAlignment);
 
     const auto dynSymOff = static_cast<std::uint64_t>(buf.size());
@@ -131,7 +132,7 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     for (std::uint8_t b : dynSection.DynamicSegmentData)
         dynSegBuf.push_back(b);
     _appendDynEntry(dynSegBuf, DT_STRTAB, vaddrOfExtraBlockOffset(dynStrOff));
-    _appendDynEntry(dynSegBuf, DT_STRSZ, dynSection.DynStrData.size());
+    _appendDynEntry(dynSegBuf, DT_STRSZ, dynStrSize);
     _appendDynEntry(dynSegBuf, DT_SYMTAB, vaddrOfExtraBlockOffset(dynSymOff));
     _appendDynEntry(dynSegBuf, DT_SYMENT, kSymEntrySize);
     if (!dynSection.RelaData.empty()) {
@@ -191,7 +192,7 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
 
     SectionHeaderTableRequest sectionRequest{};
     sectionRequest.DynStrOffset = dynStrOff;
-    sectionRequest.DynStrSize = dynSection.DynStrData.size();
+    sectionRequest.DynStrSize = dynStrSize;
     sectionRequest.DynSymOffset = dynSymOff;
     sectionRequest.DynSymSize = dynSection.DynSymData.size();
     sectionRequest.DynamicSegmentOffset = dynSegOff;

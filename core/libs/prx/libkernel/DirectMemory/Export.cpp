@@ -145,6 +145,9 @@ int APS5_VABI sceKernelAvailableDirectMemorySize(int64_t search_start, int64_t s
  DirectMemoryFree(tmpPhys, PS5_PAGE_SIZE);
  *phys_addr_out = tmpPhys;
  *size_out = DirectMemoryFreeRun(static_cast<uint64_t>(tmpPhys), static_cast<uint64_t>(search_end));
+ if (TraceKernelMemory()) aps5::LogErr("[kq] avail_direct 0x%llx..0x%llx align=0x%zx -> phys=0x%llx size=0x%zx\n",
+  static_cast<unsigned long long>(search_start), static_cast<unsigned long long>(search_end), alignment,
+  static_cast<unsigned long long>(tmpPhys), *size_out);
  return 0;
 }
 
@@ -154,7 +157,11 @@ int APS5_VABI sceKernelDirectMemoryQuery(int64_t offset, int flags, void* info, 
  struct DirectMemoryQueryInfo { int64_t start; int64_t end; int memory_type; };
  if (info_size < sizeof(DirectMemoryQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
  auto* q = static_cast<DirectMemoryQueryInfo*>(info);
- if (!DirectMemoryFind(offset, (flags & SCE_KERNEL_DMQ_FIND_NEXT) != 0, &q->start, &q->end, &q->memory_type)) return SCE_KERNEL_ERROR_EACCES;
+ const bool hit = DirectMemoryFind(offset, (flags & SCE_KERNEL_DMQ_FIND_NEXT) != 0, &q->start, &q->end, &q->memory_type);
+ if (TraceKernelMemory()) aps5::LogErr("[kq] dmem_query offset=0x%llx flags=0x%x -> %s start=0x%llx end=0x%llx type=%d\n",
+  static_cast<unsigned long long>(offset), flags, hit ? "ok" : "EACCES",
+  static_cast<unsigned long long>(q->start), static_cast<unsigned long long>(q->end), q->memory_type);
+ if (!hit) return SCE_KERNEL_ERROR_EACCES;
  return 0;
 }
 
@@ -224,6 +231,16 @@ int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, s
  return r;
 }
 
+void TraceQuery(const char* how, std::uintptr_t addr, int flags, const VirtualQueryInfo* info, int rc) {
+ if (!TraceKernelMemory()) return;
+ char name[33] = {};
+ std::memcpy(name, info->name, sizeof(info->name) < 32 ? sizeof(info->name) : 32);
+ aps5::LogErr("[kq] %s addr=0x%lx flags=0x%x rc=0x%x -> start=0x%lx end=0x%lx off=0x%lx prot=0x%x type=%d flex=%u direct=%u stack=%u pooled=%u committed=%u name=%s\n",
+  how, static_cast<unsigned long>(addr), flags, static_cast<unsigned>(rc), static_cast<unsigned long>(info->start),
+  static_cast<unsigned long>(info->end), static_cast<unsigned long>(info->offset), static_cast<unsigned>(info->protection),
+  info->memory_type, info->is_flexible, info->is_direct, info->is_stack, info->is_pooled, info->is_committed, name);
+}
+
 int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
  if (!info || info_size < sizeof(VirtualQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
  memset(info, 0, sizeof(VirtualQueryInfo));
@@ -259,6 +276,7 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
   info->is_committed = 1;
   ApplyRangeName(std::max<uintptr_t>(address, info->start), info);
   if (direct) info->offset = physicalOffset + info->start - directStart;
+  TraceQuery("ranges", address, flags, info, 0);
   return 0;
  }
 
@@ -293,6 +311,7 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
  info->is_flexible = 1;
  info->is_committed = 1;
  ApplyRangeName(std::max<uintptr_t>(address, info->start), info);
+ TraceQuery("hostmap", address, flags, info, 0);
  return 0;
 }
 

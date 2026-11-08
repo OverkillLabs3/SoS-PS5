@@ -91,14 +91,41 @@ int APS5_VABI sceKernelGetModuleInfoFromAddr(uint64_t addr, int n, ModuleInfo* r
  return 0;
 }
 
+namespace {
+
+struct PendingModuleArgs {
+    std::size_t args = 0;
+    const void* argp = nullptr;
+};
+thread_local PendingModuleArgs pendingModuleArgs;
+thread_local int pendingModuleInitResult = 0;
+
+}
+
+extern "C" {
+
+const void* __aps5_get_pending_module_args_nid_no_patch() {
+    return &pendingModuleArgs;
+}
+
+void __aps5_set_module_init_result_nid_no_patch(int result) {
+    pendingModuleInitResult = result;
+}
+
+}
+
 KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, size_t args, const void* argp, uint32_t flags, const KernelLoadModuleOpt* opt, int* res) {
- (void)args;
- (void)argp;
  (void)flags;
  (void)opt;
  if (res) *res = 0;
  if (!module_file_name) return static_cast<KernelModule>(SCE_KERNEL_ERROR_EFAULT);
+ pendingModuleArgs = {args, argp};
+ pendingModuleInitResult = 0;
  void* handle = dlopen_nid_postfix(module_file_name, kRtldNow);
+ const int started = pendingModuleInitResult;
+ pendingModuleArgs = {};
+ pendingModuleInitResult = 0;
+ if (res) *res = started;
  if (!handle) return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT);
  return static_cast<KernelModule>(reinterpret_cast<intptr_t>(handle));
 }

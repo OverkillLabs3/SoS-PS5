@@ -12,6 +12,14 @@
 #include <atomic>
 #ifdef _WIN32
 #include <windows.h>
+inline std::uintptr_t HostModuleBase() { return reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)); }
+#else
+#include <functional>
+#include <thread>
+inline unsigned long GetCurrentThreadId() {
+    return static_cast<unsigned long>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0x7fffffff);
+}
+inline std::uintptr_t HostModuleBase() { return 0; }
 #endif
 #include <chrono>
 #include <cstring>
@@ -155,7 +163,7 @@ Bool APS5_VABI sceAvPlayerGetVideoDataEx(AvPlayerInternal* h, AvPlayerFrameInfoE
         if (on && shown.load() < 4) {
             const auto caller = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
             static std::atomic<std::uintptr_t> first{0};
-            if (first.exchange(caller) != caller && shown.fetch_add(1) < 4) std::fprintf(stderr, "[avpstat] caller 0x%llx = exe+0x%llx tid=%lu\n", static_cast<unsigned long long>(caller), static_cast<unsigned long long>(caller - reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr))), GetCurrentThreadId());
+            if (first.exchange(caller) != caller && shown.fetch_add(1) < 4) std::fprintf(stderr, "[avpstat] caller 0x%llx = exe+0x%llx tid=%lu\n", static_cast<unsigned long long>(caller), static_cast<unsigned long long>(caller - HostModuleBase()), GetCurrentThreadId());
         }
     }
     if (!h || !video_info) return false;
