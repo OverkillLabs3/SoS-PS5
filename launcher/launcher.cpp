@@ -492,7 +492,10 @@ bool ExtractSelf(const std::wstring& selfPath, const std::wstring& elfPath) {
     struct Entry { unsigned long long props, offset, fileSize, memSize; };
     struct Header { unsigned type, flags; unsigned long long offset, vaddr, paddr, fileSize, memSize, align; };
     unsigned char head[0x20] = {};
-    bool ok = readAt(0, head, sizeof(head)) && head[0] == 0x4f && head[1] == 0x15 && head[2] == 0x3d && head[3] == 0x1d;
+    bool ok = readAt(0, head, sizeof(head));
+    // PS4-style (4F 15 3D 1D) and PS5 (54 14 F5 EE) SELF headers share the same layout.
+    ok = ok && ((head[0] == 0x4f && head[1] == 0x15 && head[2] == 0x3d && head[3] == 0x1d) ||
+                (head[0] == 0x54 && head[1] == 0x14 && head[2] == 0xf5 && head[3] == 0xee));
     const unsigned entryCount = ok ? *reinterpret_cast<unsigned short*>(head + 0x18) : 0;
     std::vector<Entry> entries(entryCount);
     unsigned char elfHead[64] = {};
